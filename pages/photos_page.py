@@ -14,7 +14,7 @@ from database import PhotoManager, PlantManager, PHOTO_DIR
 
 
 class PhotoDialog(QDialog):
-    def __init__(self, photo_path, description='', parent=None):
+    def __init__(self, photo_path, description='', shot_date='', abnormal_status='', parent=None):
         super().__init__(parent)
         self.setWindowTitle('照片预览')
         self.setMinimumSize(600, 500)
@@ -36,11 +36,28 @@ class PhotoDialog(QDialog):
 
         layout.addWidget(scroll, 1)
 
+        info_layout = QVBoxLayout()
+        info_layout.setSpacing(4)
+
+        if shot_date:
+            date_label = QLabel(f'📅 拍摄日期：{shot_date}')
+            date_label.setStyleSheet('color: #606266; padding: 4px 8px;')
+            info_layout.addWidget(date_label)
+
         if description:
             desc_label = QLabel(f'📝 {description}')
             desc_label.setWordWrap(True)
-            desc_label.setStyleSheet('color: #606266; padding: 8px;')
-            layout.addWidget(desc_label)
+            desc_label.setStyleSheet('color: #606266; padding: 4px 8px;')
+            info_layout.addWidget(desc_label)
+
+        if abnormal_status and abnormal_status != '无异常':
+            abnormal_colors = {'需关注': '#e6a23c', '病虫害': '#f56c6c', '枯死': '#909399'}
+            abnormal_color = abnormal_colors.get(abnormal_status, '#909399')
+            abnormal_label = QLabel(f'⚠ 异常情况：{abnormal_status}')
+            abnormal_label.setStyleSheet(f'color: {abnormal_color}; padding: 4px 8px; font-weight: 600;')
+            info_layout.addWidget(abnormal_label)
+
+        layout.addLayout(info_layout)
 
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
@@ -79,6 +96,13 @@ class UploadPhotoDialog(QDialog):
         photo_frame.setLayout(photo_layout)
         form.addRow('照片：', photo_frame)
 
+        self.thumbnail_label = QLabel()
+        self.thumbnail_label.setFixedSize(120, 90)
+        self.thumbnail_label.setStyleSheet('background: #f5f7fa; border-radius: 4px;')
+        self.thumbnail_label.setAlignment(Qt.AlignCenter)
+        self.thumbnail_label.hide()
+        form.addRow('预览：', self.thumbnail_label)
+
         self.shot_date = QDateEdit()
         self.shot_date.setDisplayFormat('yyyy-MM-dd')
         self.shot_date.setCalendarPopup(True)
@@ -89,6 +113,10 @@ class UploadPhotoDialog(QDialog):
         self.description_input.setFixedHeight(80)
         self.description_input.setPlaceholderText('请填写巡检说明，如：生长状态良好、发现病虫害等...')
         form.addRow('说明：', self.description_input)
+
+        self.abnormal_combo = QComboBox()
+        self.abnormal_combo.addItems(['无异常', '需关注', '病虫害', '枯死'])
+        form.addRow('异常情况：', self.abnormal_combo)
 
         layout.addLayout(form)
 
@@ -104,13 +132,18 @@ class UploadPhotoDialog(QDialog):
             self.photo_path = file_path
             self.photo_label.setText(os.path.basename(file_path))
             self.photo_label.setStyleSheet('color: #67c23a;')
+            pixmap = QPixmap(file_path)
+            if not pixmap.isNull():
+                self.thumbnail_label.setPixmap(pixmap.scaled(120, 90, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                self.thumbnail_label.show()
 
     def get_data(self):
         return {
             'plant_id': self.plant_combo.currentData(),
             'photo_path': self.photo_path,
             'shot_date': self.shot_date.date().toString('yyyy-MM-dd'),
-            'description': self.description_input.toPlainText().strip()
+            'description': self.description_input.toPlainText().strip(),
+            'abnormal_status': self.abnormal_combo.currentText()
         }
 
     def accept(self):
@@ -143,30 +176,30 @@ class PhotosPage(QWidget):
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText('🔍 搜索植株...')
         self.search_input.setFixedWidth(200)
-        self.search_input.returnPressed.connect(self.load_photos)
+        self.search_input.returnPressed.connect(self.on_filter_changed)
         tb_layout.addWidget(self.search_input)
 
         self.month_filter = QComboBox()
         self.month_filter.addItem('全部月份')
         self.month_filter.setFixedWidth(120)
-        self.month_filter.currentIndexChanged.connect(self.load_photos)
+        self.month_filter.currentIndexChanged.connect(self.on_filter_changed)
         tb_layout.addWidget(self.month_filter)
 
         self.status_filter = QComboBox()
         self.status_filter.addItem('全部状态')
         self.status_filter.addItems(['正常', '需关注', '病虫害', '枯死'])
         self.status_filter.setFixedWidth(120)
-        self.status_filter.currentIndexChanged.connect(self.load_photos)
+        self.status_filter.currentIndexChanged.connect(self.on_filter_changed)
         tb_layout.addWidget(self.status_filter)
 
         self.plant_filter = QComboBox()
         self.plant_filter.addItem('全部植株')
         self.plant_filter.setFixedWidth(160)
-        self.plant_filter.currentIndexChanged.connect(self.load_photos)
+        self.plant_filter.currentIndexChanged.connect(self.on_filter_changed)
         tb_layout.addWidget(self.plant_filter)
 
         btn_search = QPushButton('🔍 筛选')
-        btn_search.clicked.connect(self.load_photos)
+        btn_search.clicked.connect(self.on_filter_changed)
         tb_layout.addWidget(btn_search)
 
         tb_layout.addStretch()
@@ -315,6 +348,10 @@ class PhotosPage(QWidget):
             if idx >= 0:
                 self.month_filter.setCurrentIndex(idx)
 
+    def on_filter_changed(self):
+        self.load_photos()
+        self.load_timeline()
+
     def load_photos(self):
         plant_id = self.plant_filter.currentData()
         month = self.month_filter.currentData()
@@ -407,6 +444,21 @@ class PhotosPage(QWidget):
             status_label.setAlignment(Qt.AlignCenter)
             layout.insertWidget(2, status_label)
 
+        abnormal = photo.get('abnormal_status', '')
+        if abnormal and abnormal != '无异常':
+            abnormal_colors = {'需关注': '#e6a23c', '病虫害': '#f56c6c', '枯死': '#909399'}
+            abnormal_color = abnormal_colors.get(abnormal, '#909399')
+            abnormal_label = QLabel(f'⚠ {abnormal}')
+            abnormal_label.setStyleSheet(f'''
+                font-size: 10px;
+                color: {abnormal_color};
+                background: {abnormal_color}20;
+                padding: 2px 6px;
+                border-radius: 2px;
+            ''')
+            abnormal_label.setAlignment(Qt.AlignCenter)
+            layout.insertWidget(2, abnormal_label)
+
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(4)
 
@@ -448,14 +500,23 @@ class PhotosPage(QWidget):
             dest = os.path.join(PHOTO_DIR, new_name)
             shutil.copy2(data['photo_path'], dest)
 
-            PhotoManager.add(data['plant_id'], dest, data['shot_date'], data['description'])
+            PhotoManager.add(data['plant_id'], dest, data['shot_date'], data['description'], data['abnormal_status'])
             QMessageBox.information(self, '成功', '照片上传成功')
-            self.load_data()
+            self.load_plant_list()
+            self.load_month_filter()
+            self.load_photos()
+            self.load_timeline()
         except Exception as e:
             QMessageBox.critical(self, '错误', f'上传失败：{str(e)}')
 
     def view_photo(self, photo):
-        dlg = PhotoDialog(photo['file_path'], photo.get('description', ''), self)
+        dlg = PhotoDialog(
+            photo['file_path'],
+            description=photo.get('description', ''),
+            shot_date=photo.get('shot_date', ''),
+            abnormal_status=photo.get('abnormal_status', ''),
+            parent=self
+        )
         dlg.exec()
 
     def delete_photo(self, photo):
@@ -472,16 +533,19 @@ class PhotosPage(QWidget):
         self.timeline_tree.clear()
 
         plant_id = self.plant_filter.currentData()
+        month = self.month_filter.currentData()
+        status = self.status_filter.currentText()
+
         if plant_id:
             plant = PlantManager.get_by_id(plant_id)
             if plant:
-                photos_by_month = PhotoManager.get_photos_with_timeline(plant_id)
+                photos_by_month = PhotoManager.get_photos_with_timeline(plant_id, month=month, plant_status=status)
                 self._build_timeline_for_plant(plant, photos_by_month)
         else:
             plants_with_photos = set()
             all_photos = PhotoManager.get_all(
-                month=self.month_filter.currentData(),
-                plant_status=self.status_filter.currentText()
+                month=month,
+                plant_status=status
             )
             for p in all_photos:
                 if p.get('plant_id'):
@@ -490,7 +554,7 @@ class PhotosPage(QWidget):
             for pid in sorted(plants_with_photos):
                 plant = PlantManager.get_by_id(pid)
                 if plant:
-                    photos_by_month = PhotoManager.get_photos_with_timeline(pid)
+                    photos_by_month = PhotoManager.get_photos_with_timeline(pid, month=month, plant_status=status)
                     self._build_timeline_for_plant(plant, photos_by_month)
 
     def _build_timeline_for_plant(self, plant, photos_by_month):

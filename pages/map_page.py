@@ -2,7 +2,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame
                                QPushButton, QLineEdit, QComboBox, QSpinBox,
                                QDoubleSpinBox, QDateEdit, QTextEdit, QFormLayout,
                                QListWidget, QListWidgetItem, QSplitter, QMessageBox,
-                               QInputDialog, QFileDialog)
+                               QInputDialog, QFileDialog, QDialog)
 from PySide6.QtCore import Qt, QPoint, QRect, Signal
 from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QPixmap, QFont, QMouseEvent
 
@@ -17,6 +17,7 @@ MAP_IMAGE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__f
 class MapCanvas(QWidget):
     plant_selected = Signal(int)
     plant_moved = Signal(int, float, float)
+    plants_selected = Signal(list)
 
     def __init__(self):
         super().__init__()
@@ -28,6 +29,13 @@ class MapCanvas(QWidget):
         self.drag_offset = QPoint()
         self.scale = 1.0
         self.background_pixmap = None
+        self.show_areas = True
+        self.selection_mode = False
+        self.selected_plants = []
+        self.selecting = False
+        self.selection_start = QPoint()
+        self.selection_end = QPoint()
+        self.area_colors = ['#409eff', '#67c23a', '#e6a23c', '#f56c6c', '#909399', '#9b59b6', '#1abc9c']
         self.load_background()
 
     def load_background(self):
@@ -85,6 +93,37 @@ class MapCanvas(QWidget):
             for y in range(0, h, grid_size):
                 painter.drawLine(0, y, w, y)
 
+        if self.show_areas:
+            area_groups = {}
+            for plant in self.plants:
+                an = plant.get('area_name') or ''
+                if an:
+                    if an not in area_groups:
+                        area_groups[an] = []
+                    area_groups[an].append(plant)
+            color_idx = 0
+            for area_name, group in area_groups.items():
+                if not group:
+                    continue
+                min_x = min(int(p['position_x'] * w) for p in group)
+                min_y = min(int(p['position_y'] * h) for p in group)
+                max_x = max(int(p['position_x'] * w) for p in group)
+                max_y = max(int(p['position_y'] * h) for p in group)
+                rect = QRect(min_x - 20, min_y - 20, max_x - min_x + 40, max_y - min_y + 40)
+                base_color = QColor(self.area_colors[color_idx % len(self.area_colors)])
+                fill_color = QColor(base_color.red(), base_color.green(), base_color.blue(), 77)
+                painter.setPen(QPen(base_color, 2))
+                painter.setBrush(QBrush(fill_color))
+                painter.drawRoundedRect(rect, 8, 8)
+                label_rect = QRect(rect.x(), rect.y(), len(area_name) * 14 + 16, 24)
+                painter.setPen(QPen(base_color, 1))
+                painter.setBrush(QBrush(QColor(255, 255, 255, 220)))
+                painter.drawRoundedRect(label_rect, 4, 4)
+                painter.setPen(base_color)
+                painter.setFont(QFont('Microsoft YaHei', 10, QFont.Bold))
+                painter.drawText(label_rect, Qt.AlignCenter, area_name)
+                color_idx += 1
+
         for plant in self.plants:
             x = int(plant['position_x'] * w)
             y = int(plant['position_y'] * h)
@@ -99,6 +138,8 @@ class MapCanvas(QWidget):
             }
             color = status_colors.get(plant['status'], '#409eff')
 
+            is_selected = plant['id'] in self.selected_plants
+
             if plant['id'] == self.selected_id:
                 painter.setPen(QPen(QColor(color), 3))
                 painter.setBrush(QBrush(QColor(color)))
@@ -111,12 +152,30 @@ class MapCanvas(QWidget):
                 painter.setBrush(QBrush(QColor(color)))
                 painter.drawEllipse(x - 14, y - 14, 28, 28)
 
+            if is_selected:
+                painter.setPen(QPen(QColor('#409eff'), 2))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawEllipse(x - 20, y - 20, 40, 40)
+
             painter.setPen(QColor('#ffffff'))
             painter.setFont(QFont('Microsoft YaHei', 9, QFont.Bold))
             painter.drawText(QRect(x - 20, y - 10, 40, 20), Qt.AlignCenter, plant['name'][:2])
 
+        if self.selecting:
+            sel_rect = QRect(self.selection_start, self.selection_end).normalized()
+            painter.setPen(QPen(QColor('#409eff'), 2, Qt.DashLine))
+            painter.setBrush(QBrush(QColor(64, 158, 255, 50)))
+            painter.drawRect(sel_rect)
+
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.LeftButton:
+            if self.selection_mode and event.modifiers() & Qt.ShiftModifier:
+                self.selecting = True
+                self.selection_start = QPoint(int(event.position().x()), int(event.position().y()))
+                self.selection_end = QPoint(self.selection_start)
+                self.selected_plants = []
+                self.update()
+                return
             w = self.width()
             h = self.height()
             for plant in reversed(self.plants):
@@ -134,6 +193,10 @@ class MapCanvas(QWidget):
             self.update()
 
     def mouseMoveEvent(self, event: QMouseEvent):
+        if self.selecting:
+            self.selection_end = QPoint(int(event.position().x()), int(event.position().y()))
+            self.update()
+            return
         if self.dragging and self.selected_id is not None:
             w = self.width()
             h = self.height()
@@ -150,6 +213,21 @@ class MapCanvas(QWidget):
             self.update()
 
     def mouseReleaseEvent(self, event: QMouseEvent):
+        if self.selecting:
+            self.selecting = False
+            sel_rect = QRect(self.selection_start, self.selection_end).normalized()
+            w = self.width()
+            h = self.height()
+            self.selected_plants = []
+            for plant in self.plants:
+                px = int(plant['position_x'] * w)
+                py = int(plant['position_y'] * h)
+                if sel_rect.contains(px, py):
+                    self.selected_plants.append(plant['id'])
+            self.update()
+            if self.selected_plants:
+                self.plants_selected.emit(self.selected_plants)
+            return
         if self.dragging and self.selected_id is not None:
             w = self.width()
             h = self.height()
@@ -172,6 +250,10 @@ class MapCanvas(QWidget):
             x_ratio = event.position().x() / w
             y_ratio = event.position().y() / h
             self.parent().add_plant_at(x_ratio, y_ratio)
+
+    def clear_selection(self):
+        self.selected_plants = []
+        self.update()
 
 
 class MapPage(QWidget):
@@ -203,6 +285,17 @@ class MapPage(QWidget):
         tb_layout.addWidget(self.area_combo)
 
         tb_layout.addStretch()
+
+        self.btn_area_layer = QPushButton('🗺️ 区域图层')
+        self.btn_area_layer.setCheckable(True)
+        self.btn_area_layer.setChecked(True)
+        self.btn_area_layer.clicked.connect(self.toggle_area_layer)
+        tb_layout.addWidget(self.btn_area_layer)
+
+        self.btn_batch_select = QPushButton('🔲 批量选择')
+        self.btn_batch_select.setCheckable(True)
+        self.btn_batch_select.clicked.connect(self.toggle_selection_mode)
+        tb_layout.addWidget(self.btn_batch_select)
 
         btn_bg = QPushButton('🗺️ 导入底图')
         btn_bg.clicked.connect(self.import_background)
@@ -241,6 +334,7 @@ class MapPage(QWidget):
         self.canvas = MapCanvas()
         self.canvas.plant_selected.connect(self.on_canvas_select)
         self.canvas.plant_moved.connect(self.on_plant_moved)
+        self.canvas.plants_selected.connect(self.on_plants_selected)
 
         right_panel = QFrame()
         right_panel.setStyleSheet('background: white; border-radius: 8px;')
@@ -319,7 +413,7 @@ class MapPage(QWidget):
 
         layout.addWidget(splitter, 1)
 
-        hint = QLabel('💡 提示：双击地图空白处添加植株，拖拽点位可调整位置')
+        hint = QLabel('💡 提示：双击地图空白处添加植株，拖拽点位可调整位置 | 批量选择模式下 Shift+拖拽框选')
         hint.setStyleSheet('color: #909399; font-size: 12px; padding: 4px 8px;')
         layout.addWidget(hint)
 
@@ -400,6 +494,69 @@ class MapPage(QWidget):
                 self.all_plants[i]['position_x'] = x
                 self.all_plants[i]['position_y'] = y
                 break
+
+    def toggle_area_layer(self):
+        self.canvas.show_areas = self.btn_area_layer.isChecked()
+        self.canvas.update()
+
+    def toggle_selection_mode(self):
+        self.canvas.selection_mode = self.btn_batch_select.isChecked()
+        if not self.canvas.selection_mode:
+            self.canvas.clear_selection()
+
+    def on_plants_selected(self, plant_ids):
+        self.show_batch_dialog(plant_ids)
+
+    def show_batch_dialog(self, plant_ids):
+        if not plant_ids:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f'批量操作（已选 {len(plant_ids)} 个植株）')
+        dialog.setMinimumWidth(360)
+        layout = QVBoxLayout(dialog)
+
+        form = QFormLayout()
+        form.setSpacing(12)
+
+        responsible_input = QLineEdit()
+        form.addRow('责任人：', responsible_input)
+
+        status_combo = QComboBox()
+        status_combo.addItems(['', '正常', '需关注', '病虫害', '枯死'])
+        form.addRow('状态：', status_combo)
+
+        area_name_input = QLineEdit()
+        form.addRow('区域：', area_name_input)
+
+        layout.addLayout(form)
+
+        hint = QLabel('留空的字段将不会被修改')
+        hint.setStyleSheet('color: #909399; font-size: 12px;')
+        layout.addWidget(hint)
+
+        btn_layout = QHBoxLayout()
+        btn_ok = QPushButton('确认修改')
+        btn_ok.setProperty('class', 'primary')
+        btn_ok.clicked.connect(dialog.accept)
+        btn_layout.addWidget(btn_ok)
+        btn_cancel = QPushButton('取消')
+        btn_cancel.clicked.connect(dialog.reject)
+        btn_layout.addWidget(btn_cancel)
+        layout.addLayout(btn_layout)
+
+        if dialog.exec() == QDialog.Accepted:
+            responsible = responsible_input.text().strip()
+            status = status_combo.currentText()
+            area_name = area_name_input.text().strip()
+            if responsible:
+                PlantManager.batch_update(plant_ids, 'responsible', responsible)
+            if status:
+                PlantManager.batch_update(plant_ids, 'status', status)
+            if area_name:
+                PlantManager.batch_update(plant_ids, 'area_name', area_name)
+            self.canvas.clear_selection()
+            self.refresh()
+            QMessageBox.information(self, '成功', f'已批量更新 {len(plant_ids)} 个植株')
 
     def load_detail(self, plant_id):
         plant = PlantManager.get_by_id(plant_id)

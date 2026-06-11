@@ -2,13 +2,68 @@ from datetime import datetime
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFrame, QPushButton,
                                QLabel, QTableWidget, QTableWidgetItem, QHeaderView,
-                               QComboBox, QLineEdit, QDoubleSpinBox, QDateEdit, QTextEdit,
+                               QComboBox, QLineEdit, QDoubleSpinBox, QSpinBox, QDateEdit, QTextEdit,
                                QFormLayout, QDialog, QDialogButtonBox, QMessageBox,
-                               QTabWidget, QGroupBox)
+                               QTabWidget, QGroupBox, QProgressBar)
 from PySide6.QtCore import Qt, QDate
 from PySide6.QtGui import QColor
 
 from database import ExpenseManager, PlantManager
+
+
+class BudgetDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('设置预算')
+        self.setMinimumWidth(380)
+
+        layout = QVBoxLayout(self)
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignRight)
+
+        self.year_spin = QSpinBox()
+        self.year_spin.setRange(2020, 2099)
+        self.year_spin.setValue(datetime.now().year)
+        form.addRow('年份：', self.year_spin)
+
+        self.category_combo = QComboBox()
+        self.category_combo.addItems(['采购', '补植', '养护', '农药', '肥料', '设备', '其他'])
+        form.addRow('费用类型：', self.category_combo)
+
+        self.area_combo = QComboBox()
+        self.area_combo.addItem('全局', '')
+        areas = PlantManager.get_areas()
+        for a in areas:
+            self.area_combo.addItem(a, a)
+        form.addRow('区域：', self.area_combo)
+
+        self.amount_spin = QDoubleSpinBox()
+        self.amount_spin.setRange(0, 999999999)
+        self.amount_spin.setPrefix('¥ ')
+        self.amount_spin.setDecimals(2)
+        self.amount_spin.setValue(0)
+        form.addRow('预算金额：', self.amount_spin)
+
+        self.notes_input = QTextEdit()
+        self.notes_input.setFixedHeight(60)
+        form.addRow('备注：', self.notes_input)
+
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def get_data(self):
+        return {
+            'year': self.year_spin.value(),
+            'category': self.category_combo.currentText(),
+            'area_name': self.area_combo.currentData(),
+            'amount': self.amount_spin.value(),
+            'notes': self.notes_input.toPlainText().strip(),
+        }
 
 
 class ExpenseDialog(QDialog):
@@ -131,6 +186,11 @@ class ExpensesPage(QWidget):
         self.contract_alert_label.setStyleSheet('font-size: 14px; color: #f56c6c; font-weight: 600;')
         sb_layout.addWidget(self.contract_alert_label)
 
+        self.budget_alert_label = QLabel('')
+        self.budget_alert_label.setStyleSheet('font-size: 14px; color: #f56c6c; font-weight: 600;')
+        self.budget_alert_label.setVisible(False)
+        sb_layout.addWidget(self.budget_alert_label)
+
         sb_layout.addStretch()
 
         layout.addWidget(summary_bar)
@@ -207,11 +267,62 @@ class ExpensesPage(QWidget):
 
         tabs.addTab(contract_tab, '合同到期提醒')
 
+        budget_tab = QWidget()
+        budget_layout = QVBoxLayout(budget_tab)
+        budget_layout.setContentsMargins(0, 0, 0, 0)
+        budget_layout.setSpacing(8)
+
+        budget_toolbar = QFrame()
+        budget_toolbar.setStyleSheet('background: white; border-radius: 8px;')
+        bt_layout = QHBoxLayout(budget_toolbar)
+        bt_layout.setContentsMargins(12, 10, 12, 10)
+        bt_layout.setSpacing(10)
+
+        bt_layout.addWidget(QLabel('年份：'))
+        self.budget_year_combo = QComboBox()
+        current_year = datetime.now().year
+        for y in range(current_year + 1, current_year - 5, -1):
+            self.budget_year_combo.addItem(str(y), y)
+        self.budget_year_combo.setCurrentText(str(current_year))
+        self.budget_year_combo.setFixedWidth(100)
+        self.budget_year_combo.currentIndexChanged.connect(self.load_budget_progress)
+        bt_layout.addWidget(self.budget_year_combo)
+
+        bt_layout.addWidget(QLabel('区域：'))
+        self.budget_area_filter = QComboBox()
+        self.budget_area_filter.addItem('全部区域', '')
+        areas = PlantManager.get_areas()
+        for a in areas:
+            self.budget_area_filter.addItem(a, a)
+        self.budget_area_filter.setFixedWidth(120)
+        self.budget_area_filter.currentIndexChanged.connect(self.load_budget_progress)
+        bt_layout.addWidget(self.budget_area_filter)
+
+        bt_layout.addStretch()
+
+        btn_set_budget = QPushButton('💰 设置预算')
+        btn_set_budget.setProperty('class', 'primary')
+        btn_set_budget.clicked.connect(self.open_budget_dialog)
+        bt_layout.addWidget(btn_set_budget)
+
+        budget_layout.addWidget(budget_toolbar)
+
+        self.budget_table = QTableWidget(0, 7)
+        self.budget_table.setHorizontalHeaderLabels(['费用类型', '区域', '预算金额', '已使用', '剩余', '进度', '状态'])
+        self.budget_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.budget_table.verticalHeader().setVisible(False)
+        self.budget_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.budget_table.setSelectionBehavior(QTableWidget.SelectRows)
+        budget_layout.addWidget(self.budget_table, 1)
+
+        tabs.addTab(budget_tab, '📊 预算管理')
+
         layout.addWidget(tabs, 1)
 
     def refresh(self):
         self.load_expenses()
         self.load_contract_alerts()
+        self.load_budget_progress()
         self.update_summary()
 
     def update_summary(self):
@@ -226,6 +337,15 @@ class ExpensesPage(QWidget):
 
         contracts = ExpenseManager.get_contracts_soon(30)
         self.contract_alert_label.setText(f'🔔 即将到期合同：{len(contracts)} 份')
+
+        current_year = datetime.now().year
+        progress_list = ExpenseManager.get_budget_progress(current_year)
+        overspent = [p for p in progress_list if p['progress_pct'] > 100]
+        if overspent:
+            self.budget_alert_label.setVisible(True)
+            self.budget_alert_label.setText(f'⚠️ 预算超支：{len(overspent)} 项')
+        else:
+            self.budget_alert_label.setVisible(False)
 
     def load_expenses(self):
         expense_type = self.type_filter.currentText()
@@ -376,7 +496,75 @@ class ExpensesPage(QWidget):
             QMessageBox.information(self, '成功', '合同已续签')
             self.refresh()
 
-    def refresh(self):
-        self.load_expenses()
-        self.load_contract_alerts()
-        self.update_summary()
+    def load_budget_progress(self):
+        year = self.budget_year_combo.currentData()
+        if not year:
+            return
+        area_name = self.budget_area_filter.currentData()
+        area_name = area_name if area_name else None
+        progress_list = ExpenseManager.get_budget_progress(year, area_name=area_name)
+
+        self.budget_table.setRowCount(0)
+        for p in progress_list:
+            row = self.budget_table.rowCount()
+            self.budget_table.insertRow(row)
+
+            self.budget_table.setItem(row, 0, QTableWidgetItem(p['category']))
+            self.budget_table.setItem(row, 1, QTableWidgetItem(p['area_name'] or '全局'))
+
+            budget_item = QTableWidgetItem(f"¥ {p['budget_amount']:,.2f}")
+            budget_item.setForeground(QColor('#409eff'))
+            self.budget_table.setItem(row, 2, budget_item)
+
+            spent_item = QTableWidgetItem(f"¥ {p['spent_amount']:,.2f}")
+            spent_item.setForeground(QColor('#e6a23c'))
+            self.budget_table.setItem(row, 3, spent_item)
+
+            remaining = p['budget_amount'] - p['spent_amount']
+            remaining_item = QTableWidgetItem(f"¥ {remaining:,.2f}")
+            if remaining < 0:
+                remaining_item.setForeground(QColor('#f56c6c'))
+            else:
+                remaining_item.setForeground(QColor('#67c23a'))
+            self.budget_table.setItem(row, 4, remaining_item)
+
+            progress_bar = QProgressBar()
+            progress_bar.setRange(0, 100)
+            pct = int(min(p['progress_pct'], 100))
+            progress_bar.setValue(pct)
+            if p['progress_pct'] < 80:
+                progress_bar.setStyleSheet(
+                    'QProgressBar::chunk{background:#67c23a;border-radius:4px;}'
+                    'QProgressBar{border:1px solid #dcdfe6;border-radius:4px;text-align:center;}')
+            elif p['progress_pct'] <= 100:
+                progress_bar.setStyleSheet(
+                    'QProgressBar::chunk{background:#e6a23c;border-radius:4px;}'
+                    'QProgressBar{border:1px solid #dcdfe6;border-radius:4px;text-align:center;}')
+            else:
+                progress_bar.setStyleSheet(
+                    'QProgressBar::chunk{background:#f56c6c;border-radius:4px;}'
+                    'QProgressBar{border:1px solid #dcdfe6;border-radius:4px;text-align:center;}')
+            self.budget_table.setCellWidget(row, 5, progress_bar)
+
+            if p['progress_pct'] < 80:
+                status_item = QTableWidgetItem('正常')
+                status_item.setForeground(QColor('#67c23a'))
+            elif p['progress_pct'] <= 100:
+                status_item = QTableWidgetItem('接近预算')
+                status_item.setForeground(QColor('#e6a23c'))
+            else:
+                status_item = QTableWidgetItem('⚠️ 超支')
+                status_item.setForeground(QColor('#f56c6c'))
+            self.budget_table.setItem(row, 6, status_item)
+
+    def open_budget_dialog(self):
+        dlg = BudgetDialog(self)
+        if dlg.exec() == QDialog.Accepted:
+            data = dlg.get_data()
+            ExpenseManager.set_budget(
+                data['year'], data['category'],
+                data['area_name'], data['amount'], data['notes']
+            )
+            QMessageBox.information(self, '成功', '预算设置成功')
+            self.load_budget_progress()
+            self.update_summary()

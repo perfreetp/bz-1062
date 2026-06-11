@@ -101,10 +101,32 @@ def init_db():
         value TEXT
     )''')
 
+    c.execute('''CREATE TABLE IF NOT EXISTS budgets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        year INTEGER NOT NULL,
+        category TEXT NOT NULL,
+        area_name TEXT,
+        budget_amount REAL NOT NULL,
+        notes TEXT
+    )''')
+
     c.execute("PRAGMA table_info(photos)")
     columns = [col[1] for col in c.fetchall()]
     if 'shot_date' not in columns:
         c.execute("ALTER TABLE photos ADD COLUMN shot_date TEXT")
+    if 'abnormal_status' not in columns:
+        c.execute("ALTER TABLE photos ADD COLUMN abnormal_status TEXT DEFAULT '无异常'")
+
+    c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='budgets'")
+    if not c.fetchone():
+        c.execute('''CREATE TABLE IF NOT EXISTS budgets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            year INTEGER NOT NULL,
+            category TEXT NOT NULL,
+            area_name TEXT,
+            budget_amount REAL NOT NULL,
+            notes TEXT
+        )''')
 
     conn.commit()
     conn.close()
@@ -445,19 +467,19 @@ class PhotoManager:
             query += " AND strftime('%Y-%m', COALESCE(ph.shot_date, ph.upload_date)) = ?"
             params.append(month)
         if plant_status and plant_status != '全部状态':
-            query += " AND p.status = ?"
-            params.append(plant_status)
+            query += " AND (p.status = ? OR ph.abnormal_status = ?)"
+            params.extend([plant_status, plant_status])
         query += " ORDER BY COALESCE(ph.shot_date, ph.upload_date) DESC"
         rows = c.execute(query, params).fetchall()
         conn.close()
         return [dict(row) for row in rows]
 
     @staticmethod
-    def add(plant_id, file_path, shot_date=None, description=''):
+    def add(plant_id, file_path, shot_date=None, description='', abnormal_status='无异常'):
         conn = get_conn()
         c = conn.cursor()
-        c.execute("INSERT INTO photos (plant_id, file_path, shot_date, description) VALUES (?, ?, ?, ?)",
-                  (plant_id, file_path, shot_date, description))
+        c.execute("INSERT INTO photos (plant_id, file_path, shot_date, description, abnormal_status) VALUES (?, ?, ?, ?, ?)",
+                  (plant_id, file_path, shot_date, description, abnormal_status))
         photo_id = c.lastrowid
         conn.commit()
         conn.close()
@@ -473,15 +495,22 @@ class PhotoManager:
         return [row['month'] for row in rows if row['month']]
 
     @staticmethod
-    def get_photos_with_timeline(plant_id):
+    def get_photos_with_timeline(plant_id, month=None, plant_status=None):
         conn = get_conn()
         c = conn.cursor()
-        rows = c.execute('''SELECT ph.*, p.name as plant_name, p.status as plant_status
-                            FROM photos ph
-                            LEFT JOIN plants p ON ph.plant_id = p.id
-                            WHERE ph.plant_id = ?
-                            ORDER BY COALESCE(ph.shot_date, ph.upload_date) DESC''',
-                         (plant_id,)).fetchall()
+        query = '''SELECT ph.*, p.name as plant_name, p.status as plant_status
+                    FROM photos ph
+                    LEFT JOIN plants p ON ph.plant_id = p.id
+                    WHERE ph.plant_id = ?'''
+        params = [plant_id]
+        if month:
+            query += " AND strftime('%Y-%m', COALESCE(ph.shot_date, ph.upload_date)) = ?"
+            params.append(month)
+        if plant_status and plant_status != '全部状态':
+            query += " AND (p.status = ? OR ph.abnormal_status = ?)"
+            params.extend([plant_status, plant_status])
+        query += " ORDER BY COALESCE(ph.shot_date, ph.upload_date) DESC"
+        rows = c.execute(query, params).fetchall()
         conn.close()
         photos = [dict(row) for row in rows]
 
@@ -589,7 +618,7 @@ class ExpenseManager:
     def get_monthly_expenses():
         conn = get_conn()
         c = conn.cursor()
-        rows = c.execute('''SELECT 
+        rows = c.execute('''SELECT
                             strftime('%Y-%m', expense_date) as month,
                             expense_type,
                             COALESCE(SUM(amount), 0) as total
@@ -601,12 +630,104 @@ class ExpenseManager:
         return [dict(row) for row in rows]
 
     @staticmethod
+    def get_monthly_expenses_by_type(area_name=None):
+        conn = get_conn()
+        c = conn.cursor()
+        query = '''SELECT
+                    strftime('%Y-%m', e.expense_date) as month,
+                    e.expense_type,
+                    COALESCE(SUM(e.amount), 0) as total
+                    FROM expenses e
+                    LEFT JOIN plants p ON e.related_plant_id = p.id
+                    WHERE 1=1'''
+        params = []
+        if area_name:
+            query += ' AND p.area_name = ?'
+            params.append(area_name)
+        query += ' GROUP BY month, e.expense_type ORDER BY month ASC'
+        rows = c.execute(query, params).fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+
+    @staticmethod
     def get_total_expense():
         conn = get_conn()
         c = conn.cursor()
         total = c.execute("SELECT COALESCE(SUM(amount), 0) FROM expenses").fetchone()[0]
         conn.close()
         return round(total, 2)
+
+    @staticmethod
+    def set_budget(year, category, area_name, amount, notes=''):
+        conn = get_conn()
+        c = conn.cursor()
+        c.execute('''DELETE FROM budgets WHERE year = ? AND category = ? AND COALESCE(area_name, '') = COALESCE(?, '')''',
+                  (year, category, area_name))
+        c.execute('''INSERT INTO budgets (year, category, area_name, budget_amount, notes)
+                    VALUES (?, ?, ?, ?, ?)''',
+                  (year, category, area_name if area_name else None, amount, notes))
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def get_budgets(year=None):
+        conn = get_conn()
+        c = conn.cursor()
+        query = "SELECT * FROM budgets WHERE 1=1"
+        params = []
+        if year:
+            query += " AND year = ?"
+            params.append(year)
+        query += " ORDER BY year DESC, category, area_name"
+        rows = c.execute(query, params).fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    def get_budget_progress(year, category=None, area_name=None):
+        conn = get_conn()
+        c = conn.cursor()
+        query = "SELECT * FROM budgets WHERE year = ?"
+        params = [year]
+        if category:
+            query += " AND category = ?"
+            params.append(category)
+        if area_name:
+            query += " AND COALESCE(area_name, '') = COALESCE(?, '')"
+            params.append(area_name)
+        rows = c.execute(query, params).fetchall()
+
+        result = []
+        for row in rows:
+            b = dict(row)
+            spent = 0.0
+            if b['area_name']:
+                spent_row = c.execute(
+                    '''SELECT COALESCE(SUM(e.amount), 0) FROM expenses e
+                       LEFT JOIN plants p ON e.related_plant_id = p.id
+                       WHERE e.expense_type = ? AND p.area_name = ? AND strftime('%Y', e.expense_date) = ?''',
+                    (b['category'], b['area_name'], str(year))
+                ).fetchone()
+                spent = spent_row[0] if spent_row else 0.0
+            else:
+                spent_row = c.execute(
+                    '''SELECT COALESCE(SUM(amount), 0) FROM expenses
+                       WHERE expense_type = ? AND strftime('%Y', expense_date) = ?''',
+                    (b['category'], str(year))
+                ).fetchone()
+                spent = spent_row[0] if spent_row else 0.0
+
+            budget_amount = b['budget_amount']
+            progress_pct = round(spent / budget_amount * 100, 1) if budget_amount > 0 else 0
+            result.append({
+                'category': b['category'],
+                'area_name': b['area_name'] or '',
+                'budget_amount': budget_amount,
+                'spent_amount': round(spent, 2),
+                'progress_pct': progress_pct,
+            })
+        conn.close()
+        return result
 
 
 class SettingsManager:

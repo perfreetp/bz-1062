@@ -163,6 +163,12 @@ class ReportsPage(QWidget):
         self._init_stat_tab(stat_layout)
         tabs.addTab(stat_tab, '📊 数据统计')
 
+        biz_tab = QWidget()
+        biz_layout = QVBoxLayout(biz_tab)
+        biz_layout.setContentsMargins(0, 0, 0, 0)
+        self._init_business_tab(biz_layout)
+        tabs.addTab(biz_tab, '📈 经营分析')
+
         abnormal_tab = QWidget()
         abn_layout = QVBoxLayout(abnormal_tab)
         abn_layout.setContentsMargins(0, 0, 0, 0)
@@ -233,8 +239,8 @@ class ReportsPage(QWidget):
         sc_title = QLabel('🌱 月度植株状态与成活率')
         sc_title.setStyleSheet('font-weight: 600; color: #303133;')
         sc_layout.addWidget(sc_title)
-        self.survival_table = QTableWidget(0, 7)
-        self.survival_table.setHorizontalHeaderLabels(['月份', '正常', '需关注', '病虫害', '枯死', '总数', '成活率'])
+        self.survival_table = QTableWidget(0, 8)
+        self.survival_table.setHorizontalHeaderLabels(['月份', '期末在养', '异常', '枯死', '补植', '期末总数', '成活率', '趋势'])
         self.survival_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.survival_table.verticalHeader().setVisible(False)
         self.survival_table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -317,6 +323,37 @@ class ReportsPage(QWidget):
         self.abn_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.abn_table.setSelectionBehavior(QTableWidget.SelectRows)
         layout.addWidget(self.abn_table, 1)
+
+    def _init_business_tab(self, layout):
+        toolbar = QFrame()
+        toolbar.setStyleSheet('background: white; border-radius: 8px;')
+        tb_layout = QHBoxLayout(toolbar)
+        tb_layout.setContentsMargins(12, 10, 12, 10)
+        tb_layout.setSpacing(10)
+
+        tb_layout.addWidget(QLabel('筛选区域：'))
+        self.biz_area_combo = QComboBox()
+        self.biz_area_combo.addItem('全部区域', None)
+        self.biz_area_combo.setFixedWidth(160)
+        self.biz_area_combo.currentIndexChanged.connect(self.load_business_analysis)
+        tb_layout.addWidget(self.biz_area_combo)
+
+        tb_layout.addStretch()
+
+        btn_export = QPushButton('📤 导出经营分析报表')
+        btn_export.setProperty('class', 'primary')
+        btn_export.clicked.connect(self.export_business_report)
+        tb_layout.addWidget(btn_export)
+
+        layout.addWidget(toolbar)
+
+        self.biz_table = QTableWidget(0, 10)
+        self.biz_table.setHorizontalHeaderLabels(
+            ['月份', '养护费用', '补植费用', '采购费用', '其他费用', '费用合计', '在养数', '异常数', '枯死数', '成活率'])
+        self.biz_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.biz_table.verticalHeader().setVisible(False)
+        self.biz_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        layout.addWidget(self.biz_table, 1)
 
     def _init_label_tab(self, layout):
         toolbar = QFrame()
@@ -449,6 +486,7 @@ class ReportsPage(QWidget):
 
     def refresh(self):
         self.load_statistics()
+        self.load_business_analysis()
         self.load_abnormal_data()
         self.load_label_list()
         self.load_backup_list()
@@ -491,11 +529,12 @@ class ReportsPage(QWidget):
         monthly_data = self._get_monthly_status(all_plants)
         self.survival_table.setRowCount(0)
 
+        prev_rate = None
         for month, counts in sorted(monthly_data.items()):
             row = self.survival_table.rowCount()
             self.survival_table.insertRow(row)
 
-            total = counts['normal'] + counts['warn'] + counts['sick'] + counts['dead']
+            total = counts['total']
             survival_rate = round(counts['normal'] / total * 100, 1) if total > 0 else 100
 
             self.survival_table.setItem(row, 0, QTableWidgetItem(month))
@@ -504,17 +543,17 @@ class ReportsPage(QWidget):
             normal_item.setForeground(QColor('#67c23a'))
             self.survival_table.setItem(row, 1, normal_item)
 
-            warn_item = QTableWidgetItem(str(counts['warn']))
-            warn_item.setForeground(QColor('#e6a23c'))
-            self.survival_table.setItem(row, 2, warn_item)
-
-            sick_item = QTableWidgetItem(str(counts['sick']))
-            sick_item.setForeground(QColor('#f56c6c'))
-            self.survival_table.setItem(row, 3, sick_item)
+            abnormal_item = QTableWidgetItem(str(counts['abnormal']))
+            abnormal_item.setForeground(QColor('#e6a23c'))
+            self.survival_table.setItem(row, 2, abnormal_item)
 
             dead_item = QTableWidgetItem(str(counts['dead']))
             dead_item.setForeground(QColor('#909399'))
-            self.survival_table.setItem(row, 4, dead_item)
+            self.survival_table.setItem(row, 3, dead_item)
+
+            replanted_item = QTableWidgetItem(str(counts['replanted']))
+            replanted_item.setForeground(QColor('#409eff'))
+            self.survival_table.setItem(row, 4, replanted_item)
 
             self.survival_table.setItem(row, 5, QTableWidgetItem(str(total)))
 
@@ -526,6 +565,27 @@ class ReportsPage(QWidget):
             else:
                 rate_item.setForeground(QColor('#f56c6c'))
             self.survival_table.setItem(row, 6, rate_item)
+
+            if prev_rate is not None:
+                if survival_rate > prev_rate:
+                    trend_text = '↑'
+                    trend_color = QColor('#67c23a')
+                elif survival_rate < prev_rate:
+                    trend_text = '↓'
+                    trend_color = QColor('#f56c6c')
+                else:
+                    trend_text = '→'
+                    trend_color = QColor('#909399')
+            else:
+                trend_text = '-'
+                trend_color = QColor('#909399')
+
+            trend_item = QTableWidgetItem(trend_text)
+            trend_item.setForeground(trend_color)
+            trend_item.setTextAlignment(Qt.AlignCenter)
+            self.survival_table.setItem(row, 7, trend_item)
+
+            prev_rate = survival_rate
 
         self.current_survival_data = monthly_data
         self.current_survival_plants = all_plants
@@ -544,31 +604,46 @@ class ReportsPage(QWidget):
     def _get_monthly_status(self, plants):
         monthly = {}
         now = datetime.now()
+
+        months = []
         for i in range(11, -1, -1):
-            d = now - timedelta(days=i * 30)
-            month_key = d.strftime('%Y-%m')
-            monthly[month_key] = {'normal': 0, 'warn': 0, 'sick': 0, 'dead': 0}
+            year = now.year
+            month = now.month - i
+            while month <= 0:
+                month += 12
+                year -= 1
+            months.append((year, month))
 
-        for p in plants:
-            created = p.get('created_at', '') or p.get('updated_at', '')
-            if not created:
-                continue
-            try:
-                month_key = created[:7]
-                if month_key not in monthly:
+        for year, month in months:
+            month_key = f'{year:04d}-{month:02d}'
+            if month == 12:
+                next_month_start = f'{year + 1:04d}-01-01'
+            else:
+                next_month_start = f'{year:04d}-{month + 1:02d}-01'
+
+            existing = []
+            replanted = 0
+            for p in plants:
+                created_str = p.get('created_at', '') or p.get('updated_at', '')
+                if not created_str:
                     continue
-            except:
-                continue
+                if created_str[:10] < next_month_start:
+                    existing.append(p)
+                if created_str[:7] == month_key:
+                    replanted += 1
 
-            status = p.get('status', '正常')
-            if status == '正常':
-                monthly[month_key]['normal'] += 1
-            elif status == '需关注':
-                monthly[month_key]['warn'] += 1
-            elif status == '病虫害':
-                monthly[month_key]['sick'] += 1
-            elif status == '枯死':
-                monthly[month_key]['dead'] += 1
+            normal = sum(1 for p in existing if p.get('status') == '正常')
+            abnormal = sum(1 for p in existing if p.get('status') in ('需关注', '病虫害'))
+            dead = sum(1 for p in existing if p.get('status') == '枯死')
+            total = len(existing)
+
+            monthly[month_key] = {
+                'normal': normal,
+                'abnormal': abnormal,
+                'dead': dead,
+                'replanted': replanted,
+                'total': total,
+            }
 
         return monthly
 
@@ -583,21 +658,34 @@ class ReportsPage(QWidget):
         try:
             with open(file_path, 'w', encoding='utf-8-sig', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow([f'月度植株状态与成活率报表'])
+                writer.writerow(['月度植株状态与成活率报表'])
                 writer.writerow([f'生成时间：{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'])
                 writer.writerow([f'筛选区域：{area_filter}'])
                 writer.writerow([])
 
                 writer.writerow(['一、月度汇总'])
-                writer.writerow(['月份', '正常', '需关注', '病虫害', '枯死', '总数', '成活率'])
+                writer.writerow(['月份', '期末在养', '异常', '枯死', '补植', '期末总数', '成活率', '趋势'])
 
+                prev_rate = None
                 for month, counts in sorted(self.current_survival_data.items()):
-                    total = counts['normal'] + counts['warn'] + counts['sick'] + counts['dead']
+                    total = counts['total']
                     rate = round(counts['normal'] / total * 100, 1) if total > 0 else 100
+
+                    if prev_rate is not None:
+                        if rate > prev_rate:
+                            trend = '↑'
+                        elif rate < prev_rate:
+                            trend = '↓'
+                        else:
+                            trend = '→'
+                    else:
+                        trend = '-'
+
                     writer.writerow([
-                        month, counts['normal'], counts['warn'],
-                        counts['sick'], counts['dead'], total, f'{rate}%'
+                        month, counts['normal'], counts['abnormal'],
+                        counts['dead'], counts['replanted'], total, f'{rate}%', trend
                     ])
+                    prev_rate = rate
                 writer.writerow([])
 
                 writer.writerow(['二、植株明细'])
@@ -613,6 +701,150 @@ class ReportsPage(QWidget):
                     ])
 
             QMessageBox.information(self, '成功', '成活率明细报表已导出')
+        except Exception as e:
+            QMessageBox.critical(self, '错误', f'导出失败：{str(e)}')
+
+    def load_business_analysis(self):
+        area_filter = self.biz_area_combo.currentData()
+
+        areas = PlantManager.get_areas()
+        current_area = self.biz_area_combo.currentData()
+        self.biz_area_combo.blockSignals(True)
+        self.biz_area_combo.clear()
+        self.biz_area_combo.addItem('全部区域', None)
+        for a in sorted(areas):
+            self.biz_area_combo.addItem(a, a)
+        if current_area:
+            idx = self.biz_area_combo.findData(current_area)
+            if idx >= 0:
+                self.biz_area_combo.setCurrentIndex(idx)
+        self.biz_area_combo.blockSignals(False)
+
+        all_plants = PlantManager.get_all()
+        if area_filter:
+            filtered_plants = [p for p in all_plants if p.get('area_name') == area_filter]
+        else:
+            filtered_plants = all_plants
+
+        monthly_survival = self._get_monthly_status(filtered_plants)
+
+        expenses = ExpenseManager.get_monthly_expenses_by_type(area_name=area_filter)
+        expense_by_month = {}
+        for e in expenses:
+            month = e['month']
+            if month not in expense_by_month:
+                expense_by_month[month] = {'养护费用': 0, '补植费用': 0, '采购费用': 0, '其他费用': 0}
+            etype = e['expense_type']
+            amount = e['total']
+            if '养护' in etype:
+                expense_by_month[month]['养护费用'] += amount
+            elif '补植' in etype:
+                expense_by_month[month]['补植费用'] += amount
+            elif '采购' in etype:
+                expense_by_month[month]['采购费用'] += amount
+            else:
+                expense_by_month[month]['其他费用'] += amount
+
+        self.biz_table.setRowCount(0)
+
+        for month in sorted(monthly_survival.keys()):
+            counts = monthly_survival[month]
+            row = self.biz_table.rowCount()
+            self.biz_table.insertRow(row)
+
+            self.biz_table.setItem(row, 0, QTableWidgetItem(month))
+
+            exp = expense_by_month.get(month, {'养护费用': 0, '补植费用': 0, '采购费用': 0, '其他费用': 0})
+
+            for col, key in enumerate(['养护费用', '补植费用', '采购费用', '其他费用'], 1):
+                item = QTableWidgetItem(f"¥ {exp[key]:,.2f}")
+                item.setForeground(QColor('#e6a23c'))
+                self.biz_table.setItem(row, col, item)
+
+            total_exp = exp['养护费用'] + exp['补植费用'] + exp['采购费用'] + exp['其他费用']
+            total_item = QTableWidgetItem(f"¥ {total_exp:,.2f}")
+            total_item.setForeground(QColor('#f56c6c'))
+            self.biz_table.setItem(row, 5, total_item)
+
+            normal_item = QTableWidgetItem(str(counts['normal']))
+            normal_item.setForeground(QColor('#67c23a'))
+            self.biz_table.setItem(row, 6, normal_item)
+
+            abnormal_item = QTableWidgetItem(str(counts['abnormal']))
+            abnormal_item.setForeground(QColor('#e6a23c'))
+            self.biz_table.setItem(row, 7, abnormal_item)
+
+            dead_item = QTableWidgetItem(str(counts['dead']))
+            dead_item.setForeground(QColor('#909399'))
+            self.biz_table.setItem(row, 8, dead_item)
+
+            rate = round(counts['normal'] / counts['total'] * 100, 1) if counts['total'] > 0 else 100
+            rate_item = QTableWidgetItem(f'{rate}%')
+            if rate >= 90:
+                rate_item.setForeground(QColor('#67c23a'))
+            elif rate >= 70:
+                rate_item.setForeground(QColor('#e6a23c'))
+            else:
+                rate_item.setForeground(QColor('#f56c6c'))
+            self.biz_table.setItem(row, 9, rate_item)
+
+        self.current_biz_data = {
+            'monthly_survival': monthly_survival,
+            'expense_by_month': expense_by_month,
+            'plants': filtered_plants,
+        }
+
+    def export_business_report(self):
+        area_filter = self.biz_area_combo.currentText()
+        file_path, _ = QFileDialog.getSaveFileName(self, '导出经营分析报表',
+                                                    f'经营分析报表_{area_filter}_{datetime.now().strftime("%Y%m%d")}.csv',
+                                                    'CSV文件 (*.csv)')
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, 'w', encoding='utf-8-sig', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(['经营分析报表'])
+                writer.writerow([f'生成时间：{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'])
+                writer.writerow([f'筛选区域：{area_filter}'])
+                writer.writerow([])
+
+                writer.writerow(['一、月度汇总'])
+                writer.writerow(['月份', '养护费用', '补植费用', '采购费用', '其他费用', '费用合计', '在养数', '异常数', '枯死数', '成活率'])
+
+                biz_data = self.current_biz_data
+                for month in sorted(biz_data['monthly_survival'].keys()):
+                    counts = biz_data['monthly_survival'][month]
+                    exp = biz_data['expense_by_month'].get(month, {'养护费用': 0, '补植费用': 0, '采购费用': 0, '其他费用': 0})
+                    total_exp = exp['养护费用'] + exp['补植费用'] + exp['采购费用'] + exp['其他费用']
+                    rate = round(counts['normal'] / counts['total'] * 100, 1) if counts['total'] > 0 else 100
+                    writer.writerow([
+                        month,
+                        f"{exp['养护费用']:.2f}",
+                        f"{exp['补植费用']:.2f}",
+                        f"{exp['采购费用']:.2f}",
+                        f"{exp['其他费用']:.2f}",
+                        f"{total_exp:.2f}",
+                        counts['normal'],
+                        counts['abnormal'],
+                        counts['dead'],
+                        f'{rate}%'
+                    ])
+
+                writer.writerow([])
+                writer.writerow(['二、植株明细'])
+                writer.writerow(['ID', '名称', '品种', '区域', '责任人', '状态', '种植日期', '备注'])
+
+                for p in biz_data['plants']:
+                    writer.writerow([
+                        p['id'], p['name'], p.get('species', ''),
+                        p.get('area_name', ''), p.get('responsible', ''),
+                        p.get('status', ''), p.get('plant_date', ''),
+                        p.get('notes', '')
+                    ])
+
+            QMessageBox.information(self, '成功', '经营分析报表已导出')
         except Exception as e:
             QMessageBox.critical(self, '错误', f'导出失败：{str(e)}')
 
@@ -952,6 +1184,7 @@ class ReportsPage(QWidget):
 
     def refresh(self):
         self.load_statistics()
+        self.load_business_analysis()
         self.load_abnormal_data()
         self.load_label_list()
         self.load_backup_list()
