@@ -5,7 +5,7 @@ from datetime import datetime
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFrame, QPushButton,
                                QLabel, QListWidget, QListWidgetItem, QFileDialog,
                                QMessageBox, QLineEdit, QComboBox, QGridLayout, QScrollArea,
-                               QDialog, QFormLayout, QTextEdit, QSplitter, QDateEdit,
+                               QDialog, QDialogButtonBox, QFormLayout, QTextEdit, QSplitter, QDateEdit,
                                QTabWidget, QTreeWidget, QTreeWidgetItem)
 from PySide6.QtCore import Qt, QSize, QDate
 from PySide6.QtGui import QPixmap, QIcon, QFont
@@ -68,7 +68,7 @@ class PhotoDialog(QDialog):
 
 
 class UploadPhotoDialog(QDialog):
-    def __init__(self, plants, parent=None):
+    def __init__(self, plants, selected_plant_id=None, parent=None):
         super().__init__(parent)
         self.photo_path = None
         self.setWindowTitle('上传巡检照片')
@@ -83,6 +83,10 @@ class UploadPhotoDialog(QDialog):
         for p in plants:
             label = f"{p['name']} ({p['species'] or '未知品种'})"
             self.plant_combo.addItem(label, p['id'])
+        if selected_plant_id is not None:
+            idx = self.plant_combo.findData(selected_plant_id)
+            if idx >= 0:
+                self.plant_combo.setCurrentIndex(idx)
         form.addRow('植株：', self.plant_combo)
 
         btn_select = QPushButton('📷 选择照片')
@@ -126,16 +130,22 @@ class UploadPhotoDialog(QDialog):
         layout.addWidget(buttons)
 
     def select_photo(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, '选择照片', '',
-                                                    '图片文件 (*.jpg *.jpeg *.png *.bmp *.gif)')
-        if file_path:
-            self.photo_path = file_path
-            self.photo_label.setText(os.path.basename(file_path))
-            self.photo_label.setStyleSheet('color: #67c23a;')
-            pixmap = QPixmap(file_path)
-            if not pixmap.isNull():
-                self.thumbnail_label.setPixmap(pixmap.scaled(120, 90, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-                self.thumbnail_label.show()
+        try:
+            file_path, _ = QFileDialog.getOpenFileName(self, '选择照片', '',
+                                                        '图片文件 (*.jpg *.jpeg *.png *.bmp *.gif)')
+            if file_path:
+                self.photo_path = file_path
+                self.photo_label.setText(os.path.basename(file_path))
+                self.photo_label.setStyleSheet('color: #67c23a;')
+                pixmap = QPixmap(file_path)
+                if not pixmap.isNull():
+                    self.thumbnail_label.setPixmap(pixmap.scaled(120, 90, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                    self.thumbnail_label.show()
+                else:
+                    self.thumbnail_label.hide()
+                    QMessageBox.warning(self, '提示', '无法加载该图片文件')
+        except Exception as e:
+            QMessageBox.warning(self, '错误', f'选择图片失败：{str(e)}')
 
     def get_data(self):
         return {
@@ -147,13 +157,16 @@ class UploadPhotoDialog(QDialog):
         }
 
     def accept(self):
-        if not self.photo_path:
-            QMessageBox.warning(self, '提示', '请先选择照片')
-            return
-        if self.plant_combo.currentIndex() < 0:
-            QMessageBox.warning(self, '提示', '请先选择植株')
-            return
-        super().accept()
+        try:
+            if not self.photo_path:
+                QMessageBox.warning(self, '提示', '请先选择照片')
+                return
+            if self.plant_combo.currentIndex() < 0:
+                QMessageBox.warning(self, '提示', '请先选择植株')
+                return
+            super().accept()
+        except Exception as e:
+            QMessageBox.critical(self, '错误', f'操作失败：{str(e)}')
 
 
 class PhotosPage(QWidget):
@@ -484,7 +497,14 @@ class PhotosPage(QWidget):
             QMessageBox.warning(self, '提示', '请先添加植株再上传照片')
             return
 
-        dlg = UploadPhotoDialog(self.plants, self)
+        selected_plant_id = None
+        current_item = self.plant_list.currentItem()
+        if current_item:
+            item_text = current_item.text()
+            if '全部照片' not in item_text:
+                selected_plant_id = current_item.data(Qt.UserRole)
+
+        dlg = UploadPhotoDialog(self.plants, selected_plant_id, self)
         if dlg.exec() != QDialog.Accepted:
             return
 
@@ -502,10 +522,30 @@ class PhotosPage(QWidget):
 
             PhotoManager.add(data['plant_id'], dest, data['shot_date'], data['description'], data['abnormal_status'])
             QMessageBox.information(self, '成功', '照片上传成功')
+
+            current_plant_filter = self.plant_filter.currentData()
+            current_month_filter = self.month_filter.currentData()
+            current_status_filter = self.status_filter.currentText()
+
             self.load_plant_list()
             self.load_month_filter()
-            self.load_photos()
-            self.load_timeline()
+
+            if current_plant_filter is not None:
+                idx = self.plant_filter.findData(current_plant_filter)
+                if idx >= 0:
+                    self.plant_filter.setCurrentIndex(idx)
+                if current_month_filter:
+                    idx = self.month_filter.findData(current_month_filter)
+                    if idx >= 0:
+                        self.month_filter.setCurrentIndex(idx)
+                idx = self.status_filter.findText(current_status_filter)
+                if idx >= 0:
+                    self.status_filter.setCurrentIndex(idx)
+                self.load_photos()
+                self.load_timeline()
+            else:
+                self.load_photos()
+                self.load_timeline()
         except Exception as e:
             QMessageBox.critical(self, '错误', f'上传失败：{str(e)}')
 

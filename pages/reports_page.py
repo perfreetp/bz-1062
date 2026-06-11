@@ -147,6 +147,16 @@ class LabelPrintDialog(QDialog):
 class ReportsPage(QWidget):
     def __init__(self):
         super().__init__()
+        self.current_survival_data = {}
+        self.current_survival_plants = []
+        self.current_survival_expenses = []
+        self.current_survival_area_filter = None
+        self.current_biz_data = {
+            'monthly_survival': {},
+            'expense_by_month': {},
+            'plants': [],
+            'area_filter': None,
+        }
         self.init_ui()
         self.refresh()
 
@@ -496,6 +506,11 @@ class ReportsPage(QWidget):
     def load_statistics(self):
         area_filter = self.survival_area_combo.currentData()
 
+        self.current_survival_data = {}
+        self.current_survival_plants = []
+        self.current_survival_expenses = []
+        self.current_survival_area_filter = area_filter
+
         all_plants = PlantManager.get_all()
         if area_filter:
             all_plants = [p for p in all_plants if p.get('area_name') == area_filter]
@@ -590,7 +605,7 @@ class ReportsPage(QWidget):
         self.current_survival_data = monthly_data
         self.current_survival_plants = all_plants
 
-        expenses = ExpenseManager.get_monthly_expenses()
+        expenses = ExpenseManager.get_monthly_expenses_by_type(area_name=area_filter)
         self.expense_table.setRowCount(0)
         for e in expenses:
             row = self.expense_table.rowCount()
@@ -601,51 +616,10 @@ class ReportsPage(QWidget):
             amount_item.setForeground(QColor('#e6a23c'))
             self.expense_table.setItem(row, 2, amount_item)
 
+        self.current_survival_expenses = expenses
+
     def _get_monthly_status(self, plants):
-        monthly = {}
-        now = datetime.now()
-
-        months = []
-        for i in range(11, -1, -1):
-            year = now.year
-            month = now.month - i
-            while month <= 0:
-                month += 12
-                year -= 1
-            months.append((year, month))
-
-        for year, month in months:
-            month_key = f'{year:04d}-{month:02d}'
-            if month == 12:
-                next_month_start = f'{year + 1:04d}-01-01'
-            else:
-                next_month_start = f'{year:04d}-{month + 1:02d}-01'
-
-            existing = []
-            replanted = 0
-            for p in plants:
-                created_str = p.get('created_at', '') or p.get('updated_at', '')
-                if not created_str:
-                    continue
-                if created_str[:10] < next_month_start:
-                    existing.append(p)
-                if created_str[:7] == month_key:
-                    replanted += 1
-
-            normal = sum(1 for p in existing if p.get('status') == '正常')
-            abnormal = sum(1 for p in existing if p.get('status') in ('需关注', '病虫害'))
-            dead = sum(1 for p in existing if p.get('status') == '枯死')
-            total = len(existing)
-
-            monthly[month_key] = {
-                'normal': normal,
-                'abnormal': abnormal,
-                'dead': dead,
-                'replanted': replanted,
-                'total': total,
-            }
-
-        return monthly
+        return PlantManager.get_monthly_status_by_history(plants)
 
     def export_survival_report(self):
         area_filter = self.survival_area_combo.currentText()
@@ -706,6 +680,12 @@ class ReportsPage(QWidget):
 
     def load_business_analysis(self):
         area_filter = self.biz_area_combo.currentData()
+
+        self.current_biz_data = {
+            'monthly_survival': {},
+            'expense_by_month': {},
+            'plants': [],
+        }
 
         areas = PlantManager.get_areas()
         current_area = self.biz_area_combo.currentData()
@@ -792,6 +772,7 @@ class ReportsPage(QWidget):
             'monthly_survival': monthly_survival,
             'expense_by_month': expense_by_month,
             'plants': filtered_plants,
+            'area_filter': area_filter,
         }
 
     def export_business_report(self):

@@ -128,6 +128,27 @@ def init_db():
             notes TEXT
         )''')
 
+    c.execute('''CREATE TABLE IF NOT EXISTS plant_status_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        plant_id INTEGER NOT NULL,
+        old_status TEXT,
+        new_status TEXT NOT NULL,
+        change_date TEXT NOT NULL,
+        notes TEXT,
+        FOREIGN KEY (plant_id) REFERENCES plants(id)
+    )''')
+
+    c.execute("SELECT COUNT(*) FROM plant_status_history")
+    if c.fetchone()[0] == 0:
+        c.execute("SELECT id, status, created_at FROM plants WHERE is_deleted = 0")
+        plants = c.fetchall()
+        for p in plants:
+            change_date = p['created_at'] or datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            c.execute('''INSERT INTO plant_status_history 
+                        (plant_id, old_status, new_status, change_date, notes)
+                        VALUES (?, ?, ?, ?, ?)''',
+                      (p['id'], None, p['status'], change_date, '初始状态'))
+
     conn.commit()
     conn.close()
 
@@ -165,6 +186,7 @@ class PlantManager:
     def add(data):
         conn = get_conn()
         c = conn.cursor()
+        status = data.get('status', '正常')
         c.execute('''INSERT INTO plants (name, species, spec, quantity, area, 
                     position_x, position_y, area_name, responsible, status, plant_date, notes)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
@@ -172,9 +194,14 @@ class PlantManager:
                    data.get('quantity', 1), data.get('area', 0),
                    data.get('position_x', 0), data.get('position_y', 0),
                    data.get('area_name'), data.get('responsible'),
-                   data.get('status', '正常'), data.get('plant_date'),
+                   status, data.get('plant_date'),
                    data.get('notes')))
         plant_id = c.lastrowid
+        change_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        c.execute('''INSERT INTO plant_status_history 
+                    (plant_id, old_status, new_status, change_date, notes)
+                    VALUES (?, ?, ?, ?, ?)''',
+                  (plant_id, None, status, change_date, '初始状态'))
         conn.commit()
         conn.close()
         return plant_id
@@ -183,6 +210,8 @@ class PlantManager:
     def update(plant_id, data):
         conn = get_conn()
         c = conn.cursor()
+        old_plant = c.execute("SELECT status FROM plants WHERE id = ?", (plant_id,)).fetchone()
+        old_status = old_plant['status'] if old_plant else None
         fields = []
         params = []
         for key in ['name', 'species', 'spec', 'quantity', 'area',
@@ -194,6 +223,12 @@ class PlantManager:
         fields.append("updated_at = datetime('now','localtime')")
         params.append(plant_id)
         c.execute(f"UPDATE plants SET {', '.join(fields)} WHERE id = ?", params)
+        if 'status' in data and data['status'] != old_status:
+            change_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            c.execute('''INSERT INTO plant_status_history 
+                        (plant_id, old_status, new_status, change_date, notes)
+                        VALUES (?, ?, ?, ?, ?)''',
+                      (plant_id, old_status, data['status'], change_date, '状态变更'))
         conn.commit()
         conn.close()
 
@@ -280,6 +315,99 @@ class PlantManager:
                       (value, pid))
         conn.commit()
         conn.close()
+
+    @staticmethod
+    def get_monthly_status_by_history(plants):
+        from calendar import monthrange
+        monthly = {}
+        now = datetime.now()
+        plant_ids = [p['id'] for p in plants]
+        plant_map = {p['id']: p for p in plants}
+
+        conn = get_conn()
+        c = conn.cursor()
+        placeholders = ','.join('?' * len(plant_ids)) if plant_ids else '0'
+        rows = c.execute(f'''SELECT plant_id, old_status, new_status, change_date
+                            FROM plant_status_history
+                            WHERE plant_id IN ({placeholders})
+                            ORDER BY plant_id, change_date ASC''',
+                         plant_ids if plant_ids else []).fetchall()
+        conn.close()
+
+        history_by_plant = {}
+        for row in rows:
+            pid = row['plant_id']
+            if pid not in history_by_plant:
+                history_by_plant[pid] = []
+            history_by_plant[pid].append(dict(row))
+
+        months = []
+        for i in range(11, -1, -1):
+            year = now.year
+            month = now.month - i
+            while month <= 0:
+                month += 12
+                year -= 1
+            months.append((year, month))
+
+        for year, month in months:
+            month_key = f'{year:04d}-{month:02d}'
+            _, last_day = monthrange(year, month)
+            month_end = f'{year:04d}-{month:02d}-{last_day:02d} 23:59:59'
+
+            normal = 0
+            abnormal = 0
+            dead = 0
+            replanted = 0
+            total = 0
+
+            for p in plants:
+                pid = p['id']
+                created_str = p.get('created_at', '') or p.get('updated_at', '')
+                if not created_str:
+                    continue
+                created_date = created_str[:10]
+                if created_date > month_end[:10]:
+                    continue
+
+                total += 1
+
+                if created_date[:7] == month_key:
+                    replanted += 1
+
+                status = None
+                if pid in history_by_plant:
+                    for h in reversed(history_by_plant[pid]):
+                        h_date = h['change_date'][:10] if h['change_date'] else ''
+                        if h_date and h_date <= month_end[:10]:
+                            status = h['new_status']
+                            break
+
+                if status is None:
+                    for h in history_by_plant.get(pid, []):
+                        if h['old_status'] is None:
+                            status = h['new_status']
+                            break
+
+                if status is None:
+                    status = plant_map[pid].get('status', '正常')
+
+                if status == '正常':
+                    normal += 1
+                elif status in ('需关注', '病虫害'):
+                    abnormal += 1
+                elif status == '枯死':
+                    dead += 1
+
+            monthly[month_key] = {
+                'normal': normal,
+                'abnormal': abnormal,
+                'dead': dead,
+                'replanted': replanted,
+                'total': total,
+            }
+
+        return monthly
 
 
 class MaintenanceManager:

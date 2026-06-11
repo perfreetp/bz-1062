@@ -298,6 +298,14 @@ class ExpensesPage(QWidget):
         self.budget_area_filter.currentIndexChanged.connect(self.load_budget_progress)
         bt_layout.addWidget(self.budget_area_filter)
 
+        bt_layout.addWidget(QLabel('类型：'))
+        self.budget_type_filter = QComboBox()
+        self.budget_type_filter.addItem('全部类型', '')
+        self.budget_type_filter.addItems(['采购', '补植', '养护', '农药', '肥料', '设备', '其他'])
+        self.budget_type_filter.setFixedWidth(120)
+        self.budget_type_filter.currentIndexChanged.connect(self.load_budget_progress)
+        bt_layout.addWidget(self.budget_type_filter)
+
         bt_layout.addStretch()
 
         btn_set_budget = QPushButton('💰 设置预算')
@@ -339,11 +347,18 @@ class ExpensesPage(QWidget):
         self.contract_alert_label.setText(f'🔔 即将到期合同：{len(contracts)} 份')
 
         current_year = datetime.now().year
-        progress_list = ExpenseManager.get_budget_progress(current_year)
+        category_filter = self.budget_type_filter.currentData()
+        category_filter = category_filter if category_filter else None
+        area_name = self.budget_area_filter.currentData()
+        area_name = area_name if area_name else None
+        progress_list = ExpenseManager.get_budget_progress(current_year, category=category_filter, area_name=area_name)
         overspent = [p for p in progress_list if p['progress_pct'] > 100]
         if overspent:
             self.budget_alert_label.setVisible(True)
-            self.budget_alert_label.setText(f'⚠️ 预算超支：{len(overspent)} 项')
+            if category_filter:
+                self.budget_alert_label.setText(f'⚠️ {category_filter}预算超支：{len(overspent)} 项')
+            else:
+                self.budget_alert_label.setText(f'⚠️ 预算超支：{len(overspent)} 项')
         else:
             self.budget_alert_label.setVisible(False)
 
@@ -502,7 +517,9 @@ class ExpensesPage(QWidget):
             return
         area_name = self.budget_area_filter.currentData()
         area_name = area_name if area_name else None
-        progress_list = ExpenseManager.get_budget_progress(year, area_name=area_name)
+        category_filter = self.budget_type_filter.currentData()
+        category_filter = category_filter if category_filter else None
+        progress_list = ExpenseManager.get_budget_progress(year, category=category_filter, area_name=area_name)
 
         self.budget_table.setRowCount(0)
         for p in progress_list:
