@@ -285,7 +285,7 @@ class ExpensesPage(QWidget):
             self.budget_year_combo.addItem(str(y), y)
         self.budget_year_combo.setCurrentText(str(current_year))
         self.budget_year_combo.setFixedWidth(100)
-        self.budget_year_combo.currentIndexChanged.connect(self.load_budget_progress)
+        self.budget_year_combo.currentIndexChanged.connect(self.on_budget_filter_changed)
         bt_layout.addWidget(self.budget_year_combo)
 
         bt_layout.addWidget(QLabel('区域：'))
@@ -295,7 +295,7 @@ class ExpensesPage(QWidget):
         for a in areas:
             self.budget_area_filter.addItem(a, a)
         self.budget_area_filter.setFixedWidth(120)
-        self.budget_area_filter.currentIndexChanged.connect(self.load_budget_progress)
+        self.budget_area_filter.currentIndexChanged.connect(self.on_budget_filter_changed)
         bt_layout.addWidget(self.budget_area_filter)
 
         bt_layout.addWidget(QLabel('类型：'))
@@ -303,7 +303,7 @@ class ExpensesPage(QWidget):
         self.budget_type_filter.addItem('全部类型', '')
         self.budget_type_filter.addItems(['采购', '补植', '养护', '农药', '肥料', '设备', '其他'])
         self.budget_type_filter.setFixedWidth(120)
-        self.budget_type_filter.currentIndexChanged.connect(self.load_budget_progress)
+        self.budget_type_filter.currentIndexChanged.connect(self.on_budget_filter_changed)
         bt_layout.addWidget(self.budget_type_filter)
 
         bt_layout.addStretch()
@@ -346,12 +346,17 @@ class ExpensesPage(QWidget):
         contracts = ExpenseManager.get_contracts_soon(30)
         self.contract_alert_label.setText(f'🔔 即将到期合同：{len(contracts)} 份')
 
-        current_year = datetime.now().year
+        self._update_budget_alert()
+
+    def _update_budget_alert(self):
+        budget_year = self.budget_year_combo.currentData()
+        if not budget_year:
+            budget_year = datetime.now().year
         category_filter = self.budget_type_filter.currentData()
         category_filter = category_filter if category_filter else None
         area_name = self.budget_area_filter.currentData()
         area_name = area_name if area_name else None
-        progress_list = ExpenseManager.get_budget_progress(current_year, category=category_filter, area_name=area_name)
+        progress_list = ExpenseManager.get_budget_progress(budget_year, category=category_filter, area_name=area_name)
         overspent = [p for p in progress_list if p['progress_pct'] > 100]
         if overspent:
             self.budget_alert_label.setVisible(True)
@@ -361,6 +366,10 @@ class ExpensesPage(QWidget):
                 self.budget_alert_label.setText(f'⚠️ 预算超支：{len(overspent)} 项')
         else:
             self.budget_alert_label.setVisible(False)
+
+    def on_budget_filter_changed(self):
+        self.load_budget_progress()
+        self._update_budget_alert()
 
     def load_expenses(self):
         expense_type = self.type_filter.currentText()

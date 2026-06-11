@@ -310,9 +310,22 @@ class PlantManager:
     def batch_update(ids, field, value):
         conn = get_conn()
         c = conn.cursor()
-        for pid in ids:
-            c.execute(f"UPDATE plants SET {field} = ?, updated_at = datetime('now','localtime') WHERE id = ?",
-                      (value, pid))
+        if field == 'status':
+            change_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            for pid in ids:
+                old = c.execute("SELECT status FROM plants WHERE id = ?", (pid,)).fetchone()
+                old_status = old['status'] if old else None
+                c.execute(f"UPDATE plants SET {field} = ?, updated_at = datetime('now','localtime') WHERE id = ?",
+                          (value, pid))
+                if old_status != value:
+                    c.execute('''INSERT INTO plant_status_history
+                                (plant_id, old_status, new_status, change_date, notes)
+                                VALUES (?, ?, ?, ?, ?)''',
+                              (pid, old_status, value, change_date, '批量修改状态'))
+        else:
+            for pid in ids:
+                c.execute(f"UPDATE plants SET {field} = ?, updated_at = datetime('now','localtime') WHERE id = ?",
+                          (value, pid))
         conn.commit()
         conn.close()
 
