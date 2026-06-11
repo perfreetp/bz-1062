@@ -71,6 +71,7 @@ def init_db():
         plant_id INTEGER,
         file_path TEXT NOT NULL,
         upload_date TEXT DEFAULT (datetime('now','localtime')),
+        shot_date TEXT,
         description TEXT,
         FOREIGN KEY (plant_id) REFERENCES plants(id)
     )''')
@@ -99,6 +100,11 @@ def init_db():
         key TEXT PRIMARY KEY,
         value TEXT
     )''')
+
+    c.execute("PRAGMA table_info(photos)")
+    columns = [col[1] for col in c.fetchall()]
+    if 'shot_date' not in columns:
+        c.execute("ALTER TABLE photos ADD COLUMN shot_date TEXT")
 
     conn.commit()
     conn.close()
@@ -389,33 +395,105 @@ class MaintenanceManager:
         conn.close()
         return [dict(row) for row in rows]
 
+    @staticmethod
+    def get_plan(plan_id):
+        conn = get_conn()
+        c = conn.cursor()
+        row = c.execute('''SELECT mp.*, p.name as plant_name, p.area_name
+                            FROM maintenance_plans mp
+                            LEFT JOIN plants p ON mp.plant_id = p.id
+                            WHERE mp.id = ? AND mp.is_deleted = 0''', (plan_id,)).fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    @staticmethod
+    def update_plan_date(plan_id, new_date):
+        conn = get_conn()
+        c = conn.cursor()
+        c.execute("UPDATE maintenance_plans SET next_date = ? WHERE id = ?",
+                  (new_date, plan_id))
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def get_all_tasks_within_range(start_date, end_date):
+        conn = get_conn()
+        c = conn.cursor()
+        rows = c.execute('''SELECT mp.*, p.name as plant_name, p.area_name, p.species
+                            FROM maintenance_plans mp
+                            LEFT JOIN plants p ON mp.plant_id = p.id
+                            WHERE mp.is_deleted = 0 
+                              AND mp.next_date >= ? 
+                              AND mp.next_date <= ?
+                            ORDER BY mp.next_date ASC''', (start_date, end_date)).fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+
 
 class PhotoManager:
     @staticmethod
-    def get_all(plant_id=None):
+    def get_all(plant_id=None, month=None, plant_status=None):
         conn = get_conn()
         c = conn.cursor()
-        query = "SELECT ph.*, p.name as plant_name FROM photos ph " \
+        query = "SELECT ph.*, p.name as plant_name, p.status as plant_status FROM photos ph " \
                 "LEFT JOIN plants p ON ph.plant_id = p.id WHERE 1=1"
         params = []
         if plant_id:
             query += " AND ph.plant_id = ?"
             params.append(plant_id)
-        query += " ORDER BY ph.upload_date DESC"
+        if month:
+            query += " AND strftime('%Y-%m', COALESCE(ph.shot_date, ph.upload_date)) = ?"
+            params.append(month)
+        if plant_status and plant_status != '全部状态':
+            query += " AND p.status = ?"
+            params.append(plant_status)
+        query += " ORDER BY COALESCE(ph.shot_date, ph.upload_date) DESC"
         rows = c.execute(query, params).fetchall()
         conn.close()
         return [dict(row) for row in rows]
 
     @staticmethod
-    def add(plant_id, file_path, description=''):
+    def add(plant_id, file_path, shot_date=None, description=''):
         conn = get_conn()
         c = conn.cursor()
-        c.execute("INSERT INTO photos (plant_id, file_path, description) VALUES (?, ?, ?)",
-                  (plant_id, file_path, description))
+        c.execute("INSERT INTO photos (plant_id, file_path, shot_date, description) VALUES (?, ?, ?, ?)",
+                  (plant_id, file_path, shot_date, description))
         photo_id = c.lastrowid
         conn.commit()
         conn.close()
         return photo_id
+
+    @staticmethod
+    def get_available_months():
+        conn = get_conn()
+        c = conn.cursor()
+        rows = c.execute('''SELECT DISTINCT strftime('%Y-%m', COALESCE(shot_date, upload_date)) as month
+                            FROM photos ORDER BY month DESC''').fetchall()
+        conn.close()
+        return [row['month'] for row in rows if row['month']]
+
+    @staticmethod
+    def get_photos_with_timeline(plant_id):
+        conn = get_conn()
+        c = conn.cursor()
+        rows = c.execute('''SELECT ph.*, p.name as plant_name, p.status as plant_status
+                            FROM photos ph
+                            LEFT JOIN plants p ON ph.plant_id = p.id
+                            WHERE ph.plant_id = ?
+                            ORDER BY COALESCE(ph.shot_date, ph.upload_date) DESC''',
+                         (plant_id,)).fetchall()
+        conn.close()
+        photos = [dict(row) for row in rows]
+
+        photos_by_month = {}
+        for photo in photos:
+            date_str = photo.get('shot_date') or photo.get('upload_date') or ''
+            if len(date_str) >= 7:
+                month = date_str[:7]
+                if month not in photos_by_month:
+                    photos_by_month[month] = []
+                photos_by_month[month].append(photo)
+        return photos_by_month
 
     @staticmethod
     def delete(photo_id):
@@ -529,6 +607,33 @@ class ExpenseManager:
         total = c.execute("SELECT COALESCE(SUM(amount), 0) FROM expenses").fetchone()[0]
         conn.close()
         return round(total, 2)
+
+
+class SettingsManager:
+    @staticmethod
+    def get(key, default=None):
+        conn = get_conn()
+        c = conn.cursor()
+        row = c.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        conn.close()
+        return row['value'] if row else default
+
+    @staticmethod
+    def set(key, value):
+        conn = get_conn()
+        c = conn.cursor()
+        c.execute('''INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)''',
+                  (key, str(value)))
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def delete(key):
+        conn = get_conn()
+        c = conn.cursor()
+        c.execute("DELETE FROM settings WHERE key = ?", (key,))
+        conn.commit()
+        conn.close()
 
 
 class BackupManager:

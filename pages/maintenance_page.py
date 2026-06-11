@@ -1,14 +1,156 @@
 from datetime import datetime, timedelta
+import calendar
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFrame, QPushButton,
                                QLabel, QTableWidget, QTableWidgetItem, QHeaderView,
                                QComboBox, QLineEdit, QSpinBox, QDateEdit, QTextEdit,
                                QFormLayout, QDialog, QDialogButtonBox, QMessageBox,
-                               QTabWidget, QListWidget, QListWidgetItem, QSplitter)
-from PySide6.QtCore import Qt, QDate
-from PySide6.QtGui import QColor
+                               QTabWidget, QListWidget, QListWidgetItem, QSplitter,
+                               QScrollArea, QSizePolicy, QInputDialog)
+from PySide6.QtCore import Qt, QDate, QMimeData, Signal
+from PySide6.QtGui import QColor, QDrag, QPixmap, QPainter
+from PySide6.QtWidgets import QApplication
 
 from database import MaintenanceManager, PlantManager
+
+
+class DraggableTaskLabel(QLabel):
+    def __init__(self, task, parent=None):
+        super().__init__(parent)
+        self.task = task
+        type_icons = {'浇水': '💧', '施肥': '🌾', '修剪': '✂️', '打药': '🧴', '除草': '🌿', '其他': '📝'}
+        icon = type_icons.get(task['plan_type'], '📝')
+        self.setText(f"{icon} {task['plant_name'] or '未知'}")
+        self.setStyleSheet('''
+            QLabel {
+                background: #ecf5ff;
+                border: 1px solid #b3d8ff;
+                border-radius: 4px;
+                padding: 4px 8px;
+                margin: 2px;
+                font-size: 12px;
+            }
+            QLabel:hover {
+                background: #d9ecff;
+            }
+        ''')
+        self.setCursor(Qt.PointingHandCursor)
+        self.setWordWrap(True)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.drag_start_pos = event.position()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if not (event.buttons() & Qt.LeftButton):
+            return
+        if (event.position() - self.drag_start_pos).manhattanLength() < QApplication.startDragDistance():
+            return
+
+        drag = QDrag(self)
+        mime_data = QMimeData()
+        mime_data.setText(str(self.task['id']))
+        drag.setMimeData(mime_data)
+
+        pixmap = QPixmap(self.size())
+        self.render(pixmap)
+        drag.setPixmap(pixmap)
+
+        drag.exec(Qt.MoveAction)
+
+
+class CalendarCell(QFrame):
+    task_dropped = Signal(int, str)
+
+    def __init__(self, date_str, parent=None):
+        super().__init__(parent)
+        self.date_str = date_str
+        self.setAcceptDrops(True)
+        self.setMinimumHeight(100)
+        self.setStyleSheet('''
+            CalendarCell {
+                background: white;
+                border: 1px solid #ebeef5;
+            }
+            CalendarCell:hover {
+                background: #f5f7fa;
+            }
+        ''')
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(2)
+
+        self.date_label = QLabel(date_str.split('-')[2] if len(date_str) > 0 else '')
+        self.date_label.setStyleSheet('font-weight: 600; color: #606266; font-size: 13px;')
+        layout.addWidget(self.date_label)
+
+        self.tasks_container = QVBoxLayout()
+        self.tasks_container.setSpacing(2)
+        layout.addLayout(self.tasks_container, 1)
+
+        today = datetime.now().strftime('%Y-%m-%d')
+        if date_str == today:
+            self.setStyleSheet('''
+                CalendarCell {
+                    background: #f0f9eb;
+                    border: 2px solid #67c23a;
+                }
+            ''')
+            self.date_label.setStyleSheet('font-weight: 700; color: #67c23a; font-size: 14px;')
+        elif date_str < today:
+            self.date_label.setStyleSheet('font-weight: 600; color: #c0c4cc; font-size: 13px;')
+
+    def add_task(self, task):
+        task_label = DraggableTaskLabel(task)
+        task_label.mouseDoubleClickEvent = lambda e, pid=task['id']: self.edit_task(pid)
+        self.tasks_container.addWidget(task_label)
+
+    def clear_tasks(self):
+        while self.tasks_container.count():
+            child = self.tasks_container.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+
+    def edit_task(self, plan_id):
+        parent = self.window()
+        if hasattr(parent, 'edit_plan'):
+            parent.edit_plan(plan_id)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+            self.setStyleSheet('''
+                CalendarCell {
+                    background: #ecf5ff;
+                    border: 2px solid #409eff;
+                }
+            ''')
+
+    def dragLeaveEvent(self, event):
+        today = datetime.now().strftime('%Y-%m-%d')
+        if self.date_str == today:
+            self.setStyleSheet('''
+                CalendarCell {
+                    background: #f0f9eb;
+                    border: 2px solid #67c23a;
+                }
+            ''')
+        else:
+            self.setStyleSheet('''
+                CalendarCell {
+                    background: white;
+                    border: 1px solid #ebeef5;
+                }
+            ''')
+
+    def dropEvent(self, event):
+        if event.mimeData().hasText():
+            plan_id = int(event.mimeData().text())
+            self.task_dropped.emit(plan_id, self.date_str)
+            event.acceptProposedAction()
+        self.dragLeaveEvent(None)
 
 
 class PlanDialog(QDialog):
@@ -222,6 +364,63 @@ class MaintenancePage(QWidget):
 
         tabs.addTab(week_tab, '本周安排')
 
+        month_tab = QWidget()
+        month_layout = QVBoxLayout(month_tab)
+        month_layout.setContentsMargins(0, 0, 0, 0)
+
+        month_header = QFrame()
+        month_header.setStyleSheet('background: #fdf6ec; border-radius: 6px; padding: 10px;')
+        mh_layout = QHBoxLayout(month_header)
+        mh_layout.setContentsMargins(12, 8, 12, 8)
+
+        btn_prev_month = QPushButton('◀ 上月')
+        btn_prev_month.clicked.connect(self.prev_month)
+        mh_layout.addWidget(btn_prev_month)
+
+        self.month_label = QLabel()
+        self.month_label.setStyleSheet('font-weight: 700; color: #e6a23c; font-size: 16px;')
+        self.month_label.setAlignment(Qt.AlignCenter)
+        mh_layout.addWidget(self.month_label, 1)
+
+        btn_next_month = QPushButton('下月 ▶')
+        btn_next_month.clicked.connect(self.next_month)
+        mh_layout.addWidget(btn_next_month)
+
+        btn_today = QPushButton('今天')
+        btn_today.setProperty('class', 'primary')
+        btn_today.clicked.connect(self.go_to_today)
+        mh_layout.addWidget(btn_today)
+
+        month_layout.addWidget(month_header)
+
+        weekday_header = QFrame()
+        weekday_layout = QHBoxLayout(weekday_header)
+        weekday_layout.setContentsMargins(0, 0, 0, 0)
+        weekday_layout.setSpacing(1)
+        weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+        for wd in weekdays:
+            lbl = QLabel(wd)
+            lbl.setAlignment(Qt.AlignCenter)
+            lbl.setStyleSheet('font-weight: 600; color: #909399; padding: 8px; background: #f5f7fa;')
+            weekday_layout.addWidget(lbl)
+        month_layout.addWidget(weekday_header)
+
+        self.calendar_grid = QVBoxLayout()
+        self.calendar_grid.setSpacing(1)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        self.calendar_container = QWidget()
+        self.calendar_container.setLayout(self.calendar_grid)
+        scroll.setWidget(self.calendar_container)
+        month_layout.addWidget(scroll, 1)
+
+        self.current_year = datetime.now().year
+        self.current_month = datetime.now().month
+        self.month_cells = {}
+
+        tabs.addTab(month_tab, '月历视图')
+
         records_tab = QWidget()
         records_layout = QVBoxLayout(records_tab)
         records_layout.setContentsMargins(0, 0, 0, 0)
@@ -243,6 +442,104 @@ class MaintenancePage(QWidget):
         self.load_plans()
         self.load_week_tasks()
         self.load_records()
+        self.load_month_calendar()
+
+    def prev_month(self):
+        self.current_month -= 1
+        if self.current_month < 1:
+            self.current_month = 12
+            self.current_year -= 1
+        self.load_month_calendar()
+
+    def next_month(self):
+        self.current_month += 1
+        if self.current_month > 12:
+            self.current_month = 1
+            self.current_year += 1
+        self.load_month_calendar()
+
+    def go_to_today(self):
+        self.current_year = datetime.now().year
+        self.current_month = datetime.now().month
+        self.load_month_calendar()
+
+    def load_month_calendar(self):
+        if not hasattr(self, 'calendar_grid') or self.calendar_grid is None:
+            return
+
+        self.month_label.setText(f'{self.current_year}年{self.current_month}月')
+
+        while self.calendar_grid.count():
+            item = self.calendar_grid.takeAt(0)
+            if item.widget():
+                item.widget().setParent(None)
+                item.widget().deleteLater()
+
+        self.month_cells = {}
+
+        cal = calendar.Calendar(firstweekday=6)
+        weeks = cal.monthdatescalendar(self.current_year, self.current_month)
+
+        end_day = calendar.monthrange(self.current_year, self.current_month)[1]
+        all_tasks = MaintenanceManager.get_all_tasks_within_range(
+            f'{self.current_year}-{self.current_month:02d}-01',
+            f'{self.current_year}-{self.current_month:02d}-{end_day}'
+        )
+
+        tasks_by_date = {}
+        for task in all_tasks:
+            date_key = task['next_date']
+            if date_key not in tasks_by_date:
+                tasks_by_date[date_key] = []
+            tasks_by_date[date_key].append(task)
+
+        for week in weeks:
+            week_frame = QFrame()
+            week_layout = QHBoxLayout(week_frame)
+            week_layout.setContentsMargins(0, 0, 0, 0)
+            week_layout.setSpacing(1)
+
+            for day in week:
+                date_str = day.strftime('%Y-%m-%d')
+                if day.month == self.current_month:
+                    cell = CalendarCell(date_str)
+                else:
+                    cell = CalendarCell(date_str)
+                    cell.setStyleSheet('''
+                        CalendarCell {
+                            background: #fafafa;
+                            border: 1px solid #ebeef5;
+                        }
+                    ''')
+                    cell.date_label.setStyleSheet('font-weight: 600; color: #c0c4cc; font-size: 13px;')
+
+                cell.task_dropped.connect(self.on_task_dropped)
+                self.month_cells[date_str] = cell
+
+                if date_str in tasks_by_date:
+                    for task in tasks_by_date[date_str]:
+                        cell.add_task(task)
+
+                week_layout.addWidget(cell)
+
+            self.calendar_grid.addWidget(week_frame)
+
+    def on_task_dropped(self, plan_id, new_date):
+        plan = MaintenanceManager.get_plan(plan_id)
+        if not plan:
+            return
+
+        reply = QMessageBox.question(self, '确认改期',
+                                     f'确定要将任务改期到 {new_date} 吗？')
+        if reply != QMessageBox.Yes:
+            return
+
+        try:
+            MaintenanceManager.update_plan_date(plan_id, new_date)
+            QMessageBox.information(self, '成功', '任务已改期')
+            self.refresh()
+        except Exception as e:
+            QMessageBox.critical(self, '错误', f'改期失败：{str(e)}')
 
     def load_today_tasks(self):
         tasks = MaintenanceManager.get_today_tasks()
@@ -435,31 +732,63 @@ class MaintenancePage(QWidget):
             QMessageBox.information(self, '提示', '今日没有待办任务，无需生成派工单')
             return
 
+        group_by, ok = QInputDialog.getItem(
+            self, '选择分组方式', '请选择派工单分组方式：',
+            ['按责任人', '按任务类型'], 0, False
+        )
+        if not ok:
+            return
+
         msg = f'===== 今日养护派工单 =====\n'
         msg += f'日期：{datetime.now().strftime("%Y年%m月%d日")}\n'
-        msg += f'共 {len(tasks)} 项任务\n\n'
+        msg += f'共 {len(tasks)} 项任务\n'
+        msg += f'分组方式：{group_by}\n\n'
 
-        by_type = {}
-        for task in tasks:
-            t = task['plan_type']
-            if t not in by_type:
-                by_type[t] = []
-            by_type[t].append(task)
+        if group_by == '按责任人':
+            by_responsible = {}
+            unassigned = []
+            for task in tasks:
+                resp = task.get('responsible', '').strip() or '未指定'
+                if resp == '未指定':
+                    unassigned.append(task)
+                else:
+                    if resp not in by_responsible:
+                        by_responsible[resp] = []
+                    by_responsible[resp].append(task)
 
-        for t, items in by_type.items():
-            msg += f'【{t}】{len(items)}项\n'
-            for item in items:
-                msg += f'  • {item["plant_name"] or "未知"}（{item["area_name"] or "未分区"}）'
-                if item['responsible']:
-                    msg += f' - {item["responsible"]}'
+            for resp, items in sorted(by_responsible.items()):
+                msg += f'━━━ {resp} ({len(items)}项) ━━━\n'
+                for item in items:
+                    msg += f'  □ {item["plan_type"]} - {item["plant_name"] or "未知"}（{item["area_name"] or "未分区"}）\n'
                 msg += '\n'
-            msg += '\n'
+
+            if unassigned:
+                msg += f'━━━ 未指定责任人 ({len(unassigned)}项) ━━━\n'
+                for item in unassigned:
+                    msg += f'  □ {item["plan_type"]} - {item["plant_name"] or "未知"}（{item["area_name"] or "未分区"}）\n'
+                msg += '\n'
+        else:
+            by_type = {}
+            for task in tasks:
+                t = task['plan_type']
+                if t not in by_type:
+                    by_type[t] = []
+                by_type[t].append(task)
+
+            for t, items in by_type.items():
+                msg += f'【{t}】{len(items)}项\n'
+                for item in items:
+                    msg += f'  • {item["plant_name"] or "未知"}（{item["area_name"] or "未分区"}）'
+                    if item['responsible']:
+                        msg += f' - {item["responsible"]}'
+                    msg += '\n'
+                msg += '\n'
 
         msg += '=========================='
 
         dlg = QDialog(self)
         dlg.setWindowTitle('今日派工单')
-        dlg.setMinimumSize(500, 400)
+        dlg.setMinimumSize(500, 450)
         layout = QVBoxLayout(dlg)
 
         text_edit = QTextEdit()
@@ -469,6 +798,10 @@ class MaintenancePage(QWidget):
 
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
+
+        btn_copy = QPushButton('📋 复制')
+        btn_copy.clicked.connect(lambda: self.copy_dispatch(msg))
+        btn_layout.addWidget(btn_copy)
 
         btn_print = QPushButton('🖨️ 打印')
         btn_print.clicked.connect(lambda: self.print_dispatch(msg))
@@ -480,6 +813,11 @@ class MaintenancePage(QWidget):
 
         layout.addLayout(btn_layout)
         dlg.exec()
+
+    def copy_dispatch(self, content):
+        clipboard = QApplication.clipboard()
+        clipboard.setText(content)
+        QMessageBox.information(self, '成功', '派工单已复制到剪贴板')
 
     def print_dispatch(self, content):
         QMessageBox.information(self, '提示', '打印功能已触发\n\n' + content[:100] + '...')

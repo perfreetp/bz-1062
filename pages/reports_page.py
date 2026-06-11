@@ -1,15 +1,15 @@
 import os
 import csv
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFrame, QPushButton,
                                QLabel, QTableWidget, QTableWidgetItem, QHeaderView,
                                QComboBox, QLineEdit, QTabWidget, QMessageBox,
                                QFileDialog, QListWidget, QListWidgetItem, QSpinBox,
                                QProgressBar, QGroupBox, QTextEdit, QDialog, QFormLayout,
-                               QDateEdit, QCheckBox)
-from PySide6.QtCore import Qt, QDate
-from PySide6.QtGui import QColor, QFont, QPainter
+                               QDateEdit, QCheckBox, QInputDialog)
+from PySide6.QtCore import Qt, QDate, QRect
+from PySide6.QtGui import QColor, QFont, QPainter, QPixmap, QPen, QBrush, QIcon
 from PySide6.QtPrintSupport import QPrinter, QPrintDialog
 
 from database import PlantManager, MaintenanceManager, BackupManager, ExpenseManager
@@ -71,6 +71,10 @@ class LabelPrintDialog(QDialog):
 
         self.cols_spin.valueChanged.connect(self.update_preview)
         self.size_combo.currentIndexChanged.connect(self.update_preview)
+        self.label_pixmap = None
+
+    def showEvent(self, event):
+        super().showEvent(event)
         self.update_preview()
 
     def update_preview(self):
@@ -192,6 +196,33 @@ class ReportsPage(QWidget):
         layout.addWidget(tabs)
 
     def _init_stat_tab(self, layout):
+        filter_bar = QFrame()
+        filter_bar.setStyleSheet('background: white; border-radius: 8px;')
+        fb_layout = QHBoxLayout(filter_bar)
+        fb_layout.setContentsMargins(12, 10, 12, 10)
+        fb_layout.setSpacing(10)
+
+        fb_layout.addWidget(QLabel('筛选区域：'))
+        self.survival_area_combo = QComboBox()
+        self.survival_area_combo.addItem('全部区域', None)
+        self.survival_area_combo.setFixedWidth(160)
+        self.survival_area_combo.currentIndexChanged.connect(self.load_statistics)
+        fb_layout.addWidget(self.survival_area_combo)
+
+        fb_layout.addStretch()
+
+        btn_export_survival = QPushButton('📤 导出成活率明细报表')
+        btn_export_survival.setProperty('class', 'warning')
+        btn_export_survival.clicked.connect(self.export_survival_report)
+        fb_layout.addWidget(btn_export_survival)
+
+        btn_export_report = QPushButton('📤 导出完整报表')
+        btn_export_report.setProperty('class', 'primary')
+        btn_export_report.clicked.connect(self.export_full_report)
+        fb_layout.addWidget(btn_export_report)
+
+        layout.addWidget(filter_bar)
+
         cards_layout = QHBoxLayout()
         cards_layout.setSpacing(12)
 
@@ -199,16 +230,16 @@ class ReportsPage(QWidget):
         self.survival_card.setStyleSheet('background: white; border-radius: 10px;')
         sc_layout = QVBoxLayout(self.survival_card)
         sc_layout.setContentsMargins(16, 14, 16, 14)
-        sc_title = QLabel('🌱 月度养护完成率')
+        sc_title = QLabel('🌱 月度植株状态与成活率')
         sc_title.setStyleSheet('font-weight: 600; color: #303133;')
         sc_layout.addWidget(sc_title)
-        self.survival_table = QTableWidget(0, 3)
-        self.survival_table.setHorizontalHeaderLabels(['月份', '任务数', '完成率'])
+        self.survival_table = QTableWidget(0, 7)
+        self.survival_table.setHorizontalHeaderLabels(['月份', '正常', '需关注', '病虫害', '枯死', '总数', '成活率'])
         self.survival_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.survival_table.verticalHeader().setVisible(False)
         self.survival_table.setEditTriggers(QTableWidget.NoEditTriggers)
         sc_layout.addWidget(self.survival_table, 1)
-        cards_layout.addWidget(self.survival_card, 1)
+        cards_layout.addWidget(self.survival_card, 3)
 
         self.expense_card = QFrame()
         self.expense_card.setStyleSheet('background: white; border-radius: 10px;')
@@ -223,7 +254,7 @@ class ReportsPage(QWidget):
         self.expense_table.verticalHeader().setVisible(False)
         self.expense_table.setEditTriggers(QTableWidget.NoEditTriggers)
         ec_layout.addWidget(self.expense_table, 1)
-        cards_layout.addWidget(self.expense_card, 1)
+        cards_layout.addWidget(self.expense_card, 2)
 
         layout.addLayout(cards_layout, 1)
 
@@ -245,12 +276,15 @@ class ReportsPage(QWidget):
         self.sum_amount.setStyleSheet('font-size: 14px; color: #e6a23c;')
         sb_layout.addWidget(self.sum_amount)
 
-        sb_layout.addStretch()
+        self.sum_normal = QLabel('正常：0')
+        self.sum_normal.setStyleSheet('font-size: 14px; color: #67c23a;')
+        sb_layout.addWidget(self.sum_normal)
 
-        btn_export_report = QPushButton('📤 导出完整报表')
-        btn_export_report.setProperty('class', 'primary')
-        btn_export_report.clicked.connect(self.export_full_report)
-        sb_layout.addWidget(btn_export_report)
+        self.sum_abnormal = QLabel('异常：0')
+        self.sum_abnormal.setStyleSheet('font-size: 14px; color: #f56c6c;')
+        sb_layout.addWidget(self.sum_abnormal)
+
+        sb_layout.addStretch()
 
         layout.addWidget(summary_bar)
 
@@ -422,29 +456,79 @@ class ReportsPage(QWidget):
         self.generate_acceptance()
 
     def load_statistics(self):
-        stats = PlantManager.get_statistics()
-        self.sum_plants.setText(f'植株总数：{stats["total_plants"]} 个品种')
-        self.sum_area.setText(f'绿化面积：{stats["total_area"]} ㎡')
+        area_filter = self.survival_area_combo.currentData()
+
+        all_plants = PlantManager.get_all()
+        if area_filter:
+            all_plants = [p for p in all_plants if p.get('area_name') == area_filter]
+
+        total_plants = len(all_plants)
+        total_area = sum(p.get('area', 0) for p in all_plants)
+        normal_count = sum(1 for p in all_plants if p.get('status') == '正常')
+        abnormal_count = total_plants - normal_count
+
+        self.sum_plants.setText(f'植株总数：{total_plants} 个品种')
+        self.sum_area.setText(f'绿化面积：{total_area:.2f} ㎡')
+        self.sum_normal.setText(f'正常：{normal_count}')
+        self.sum_abnormal.setText(f'异常：{abnormal_count}')
 
         total_exp = ExpenseManager.get_total_expense()
         self.sum_amount.setText(f'累计费用：¥ {total_exp:,.2f}')
 
-        monthly = MaintenanceManager.get_monthly_survival_rate()
+        areas = PlantManager.get_areas()
+        current_area = self.survival_area_combo.currentData()
+        self.survival_area_combo.blockSignals(True)
+        self.survival_area_combo.clear()
+        self.survival_area_combo.addItem('全部区域', None)
+        for a in sorted(areas):
+            self.survival_area_combo.addItem(a, a)
+        if current_area:
+            idx = self.survival_area_combo.findData(current_area)
+            if idx >= 0:
+                self.survival_area_combo.setCurrentIndex(idx)
+        self.survival_area_combo.blockSignals(False)
+
+        monthly_data = self._get_monthly_status(all_plants)
         self.survival_table.setRowCount(0)
-        for m in monthly:
+
+        for month, counts in sorted(monthly_data.items()):
             row = self.survival_table.rowCount()
             self.survival_table.insertRow(row)
-            self.survival_table.setItem(row, 0, QTableWidgetItem(m['month']))
-            self.survival_table.setItem(row, 1, QTableWidgetItem(str(m['total'])))
-            rate = round(m['completed'] / m['total'] * 100, 1) if m['total'] > 0 else 0
-            rate_item = QTableWidgetItem(f'{rate}%')
-            if rate >= 80:
+
+            total = counts['normal'] + counts['warn'] + counts['sick'] + counts['dead']
+            survival_rate = round(counts['normal'] / total * 100, 1) if total > 0 else 100
+
+            self.survival_table.setItem(row, 0, QTableWidgetItem(month))
+
+            normal_item = QTableWidgetItem(str(counts['normal']))
+            normal_item.setForeground(QColor('#67c23a'))
+            self.survival_table.setItem(row, 1, normal_item)
+
+            warn_item = QTableWidgetItem(str(counts['warn']))
+            warn_item.setForeground(QColor('#e6a23c'))
+            self.survival_table.setItem(row, 2, warn_item)
+
+            sick_item = QTableWidgetItem(str(counts['sick']))
+            sick_item.setForeground(QColor('#f56c6c'))
+            self.survival_table.setItem(row, 3, sick_item)
+
+            dead_item = QTableWidgetItem(str(counts['dead']))
+            dead_item.setForeground(QColor('#909399'))
+            self.survival_table.setItem(row, 4, dead_item)
+
+            self.survival_table.setItem(row, 5, QTableWidgetItem(str(total)))
+
+            rate_item = QTableWidgetItem(f'{survival_rate}%')
+            if survival_rate >= 90:
                 rate_item.setForeground(QColor('#67c23a'))
-            elif rate >= 60:
+            elif survival_rate >= 70:
                 rate_item.setForeground(QColor('#e6a23c'))
             else:
                 rate_item.setForeground(QColor('#f56c6c'))
-            self.survival_table.setItem(row, 2, rate_item)
+            self.survival_table.setItem(row, 6, rate_item)
+
+        self.current_survival_data = monthly_data
+        self.current_survival_plants = all_plants
 
         expenses = ExpenseManager.get_monthly_expenses()
         self.expense_table.setRowCount(0)
@@ -456,6 +540,81 @@ class ReportsPage(QWidget):
             amount_item = QTableWidgetItem(f"¥ {e['total']:,.2f}")
             amount_item.setForeground(QColor('#e6a23c'))
             self.expense_table.setItem(row, 2, amount_item)
+
+    def _get_monthly_status(self, plants):
+        monthly = {}
+        now = datetime.now()
+        for i in range(11, -1, -1):
+            d = now - timedelta(days=i * 30)
+            month_key = d.strftime('%Y-%m')
+            monthly[month_key] = {'normal': 0, 'warn': 0, 'sick': 0, 'dead': 0}
+
+        for p in plants:
+            created = p.get('created_at', '') or p.get('updated_at', '')
+            if not created:
+                continue
+            try:
+                month_key = created[:7]
+                if month_key not in monthly:
+                    continue
+            except:
+                continue
+
+            status = p.get('status', '正常')
+            if status == '正常':
+                monthly[month_key]['normal'] += 1
+            elif status == '需关注':
+                monthly[month_key]['warn'] += 1
+            elif status == '病虫害':
+                monthly[month_key]['sick'] += 1
+            elif status == '枯死':
+                monthly[month_key]['dead'] += 1
+
+        return monthly
+
+    def export_survival_report(self):
+        area_filter = self.survival_area_combo.currentText()
+        file_path, _ = QFileDialog.getSaveFileName(self, '导出成活率明细报表',
+                                                    f'成活率报表_{area_filter}_{datetime.now().strftime("%Y%m%d")}.csv',
+                                                    'CSV文件 (*.csv)')
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, 'w', encoding='utf-8-sig', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([f'月度植株状态与成活率报表'])
+                writer.writerow([f'生成时间：{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'])
+                writer.writerow([f'筛选区域：{area_filter}'])
+                writer.writerow([])
+
+                writer.writerow(['一、月度汇总'])
+                writer.writerow(['月份', '正常', '需关注', '病虫害', '枯死', '总数', '成活率'])
+
+                for month, counts in sorted(self.current_survival_data.items()):
+                    total = counts['normal'] + counts['warn'] + counts['sick'] + counts['dead']
+                    rate = round(counts['normal'] / total * 100, 1) if total > 0 else 100
+                    writer.writerow([
+                        month, counts['normal'], counts['warn'],
+                        counts['sick'], counts['dead'], total, f'{rate}%'
+                    ])
+                writer.writerow([])
+
+                writer.writerow(['二、植株明细'])
+                writer.writerow(['ID', '名称', '品种', '规格', '数量', '区域', '责任人', '状态', '种植日期', '更新时间', '备注'])
+
+                for p in self.current_survival_plants:
+                    writer.writerow([
+                        p['id'], p['name'], p.get('species', ''), p.get('spec', ''),
+                        p.get('quantity', 1), p.get('area_name', ''),
+                        p.get('responsible', ''), p.get('status', ''),
+                        p.get('plant_date', ''), p.get('updated_at', ''),
+                        p.get('notes', '')
+                    ])
+
+            QMessageBox.information(self, '成功', '成活率明细报表已导出')
+        except Exception as e:
+            QMessageBox.critical(self, '错误', f'导出失败：{str(e)}')
 
     def load_abnormal_data(self):
         abn_type = self.abn_type_combo.currentText()

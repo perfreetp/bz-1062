@@ -2,11 +2,16 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame
                                QPushButton, QLineEdit, QComboBox, QSpinBox,
                                QDoubleSpinBox, QDateEdit, QTextEdit, QFormLayout,
                                QListWidget, QListWidgetItem, QSplitter, QMessageBox,
-                               QInputDialog)
+                               QInputDialog, QFileDialog)
 from PySide6.QtCore import Qt, QPoint, QRect, Signal
 from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QPixmap, QFont, QMouseEvent
 
-from database import PlantManager
+from database import PlantManager, SettingsManager
+import os
+import shutil
+from datetime import datetime
+
+MAP_IMAGE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'maps')
 
 
 class MapCanvas(QWidget):
@@ -22,6 +27,32 @@ class MapCanvas(QWidget):
         self.dragging = False
         self.drag_offset = QPoint()
         self.scale = 1.0
+        self.background_pixmap = None
+        self.load_background()
+
+    def load_background(self):
+        bg_path = SettingsManager.get('map_background', '')
+        if bg_path and os.path.exists(bg_path):
+            self.background_pixmap = QPixmap(bg_path)
+            if self.background_pixmap.isNull():
+                self.background_pixmap = None
+        else:
+            self.background_pixmap = None
+        self.update()
+
+    def set_background(self, file_path):
+        os.makedirs(MAP_IMAGE_DIR, exist_ok=True)
+        ext = os.path.splitext(file_path)[1]
+        dest = os.path.join(MAP_IMAGE_DIR, f'map_background{ext}')
+        shutil.copy2(file_path, dest)
+        SettingsManager.set('map_background', dest)
+        self.background_pixmap = QPixmap(dest)
+        self.update()
+
+    def clear_background(self):
+        SettingsManager.delete('map_background')
+        self.background_pixmap = None
+        self.update()
 
     def set_plants(self, plants):
         self.plants = plants
@@ -38,16 +69,22 @@ class MapCanvas(QWidget):
         w = self.width()
         h = self.height()
 
-        pen = QPen(QColor('#c8e6c9'))
-        pen.setWidth(1)
-        painter.setPen(pen)
-        grid_size = 40
-        for x in range(0, w, grid_size):
-            painter.drawLine(x, 0, x, h)
-        for y in range(0, h, grid_size):
-            painter.drawLine(0, y, w, y)
+        if self.background_pixmap and not self.background_pixmap.isNull():
+            scaled_pixmap = self.background_pixmap.scaled(w, h, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+            x_offset = (w - scaled_pixmap.width()) / 2
+            y_offset = (h - scaled_pixmap.height()) / 2
+            painter.drawPixmap(int(x_offset), int(y_offset), scaled_pixmap)
+            painter.fillRect(0, 0, w, h, QColor(255, 255, 255, 30))
+        else:
+            pen = QPen(QColor('#c8e6c9'))
+            pen.setWidth(1)
+            painter.setPen(pen)
+            grid_size = 40
+            for x in range(0, w, grid_size):
+                painter.drawLine(x, 0, x, h)
+            for y in range(0, h, grid_size):
+                painter.drawLine(0, y, w, y)
 
-        area_label = QLabel()
         for plant in self.plants:
             x = int(plant['position_x'] * w)
             y = int(plant['position_y'] * h)
@@ -166,6 +203,14 @@ class MapPage(QWidget):
         tb_layout.addWidget(self.area_combo)
 
         tb_layout.addStretch()
+
+        btn_bg = QPushButton('🗺️ 导入底图')
+        btn_bg.clicked.connect(self.import_background)
+        tb_layout.addWidget(btn_bg)
+
+        btn_clear_bg = QPushButton('❌ 清除底图')
+        btn_clear_bg.clicked.connect(self.clear_background)
+        tb_layout.addWidget(btn_clear_bg)
 
         btn_add = QPushButton('➕ 添加植株')
         btn_add.setProperty('class', 'primary')
@@ -451,5 +496,21 @@ class MapPage(QWidget):
             self.clear_detail()
             self.refresh()
 
+    def import_background(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, '选择园区平面图', '',
+                                                   '图片文件 (*.jpg *.jpeg *.png *.bmp *.gif)')
+        if file_path:
+            try:
+                self.canvas.set_background(file_path)
+                QMessageBox.information(self, '成功', '园区平面图已设置为底图')
+            except Exception as e:
+                QMessageBox.critical(self, '错误', f'导入失败：{str(e)}')
+
+    def clear_background(self):
+        reply = QMessageBox.question(self, '确认', '确定要清除底图吗？')
+        if reply == QMessageBox.Yes:
+            self.canvas.clear_background()
+
     def refresh(self):
         self.load_plants()
+        self.canvas.load_background()

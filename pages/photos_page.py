@@ -5,8 +5,9 @@ from datetime import datetime
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFrame, QPushButton,
                                QLabel, QListWidget, QListWidgetItem, QFileDialog,
                                QMessageBox, QLineEdit, QComboBox, QGridLayout, QScrollArea,
-                               QDialog, QFormLayout, QTextEdit, QSplitter)
-from PySide6.QtCore import Qt, QSize
+                               QDialog, QFormLayout, QTextEdit, QSplitter, QDateEdit,
+                               QTabWidget, QTreeWidget, QTreeWidgetItem)
+from PySide6.QtCore import Qt, QSize, QDate
 from PySide6.QtGui import QPixmap, QIcon, QFont
 
 from database import PhotoManager, PlantManager, PHOTO_DIR
@@ -49,6 +50,79 @@ class PhotoDialog(QDialog):
         layout.addLayout(btn_layout)
 
 
+class UploadPhotoDialog(QDialog):
+    def __init__(self, plants, parent=None):
+        super().__init__(parent)
+        self.photo_path = None
+        self.setWindowTitle('上传巡检照片')
+        self.setMinimumWidth(450)
+
+        layout = QVBoxLayout(self)
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignRight)
+
+        self.plant_combo = QComboBox()
+        for p in plants:
+            label = f"{p['name']} ({p['species'] or '未知品种'})"
+            self.plant_combo.addItem(label, p['id'])
+        form.addRow('植株：', self.plant_combo)
+
+        btn_select = QPushButton('📷 选择照片')
+        btn_select.clicked.connect(self.select_photo)
+        self.photo_label = QLabel('未选择照片')
+        self.photo_label.setStyleSheet('color: #909399;')
+        photo_layout = QHBoxLayout()
+        photo_layout.addWidget(btn_select)
+        photo_layout.addWidget(self.photo_label, 1)
+        photo_frame = QFrame()
+        photo_frame.setLayout(photo_layout)
+        form.addRow('照片：', photo_frame)
+
+        self.shot_date = QDateEdit()
+        self.shot_date.setDisplayFormat('yyyy-MM-dd')
+        self.shot_date.setCalendarPopup(True)
+        self.shot_date.setDate(QDate.currentDate())
+        form.addRow('拍摄日期：', self.shot_date)
+
+        self.description_input = QTextEdit()
+        self.description_input.setFixedHeight(80)
+        self.description_input.setPlaceholderText('请填写巡检说明，如：生长状态良好、发现病虫害等...')
+        form.addRow('说明：', self.description_input)
+
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def select_photo(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, '选择照片', '',
+                                                    '图片文件 (*.jpg *.jpeg *.png *.bmp *.gif)')
+        if file_path:
+            self.photo_path = file_path
+            self.photo_label.setText(os.path.basename(file_path))
+            self.photo_label.setStyleSheet('color: #67c23a;')
+
+    def get_data(self):
+        return {
+            'plant_id': self.plant_combo.currentData(),
+            'photo_path': self.photo_path,
+            'shot_date': self.shot_date.date().toString('yyyy-MM-dd'),
+            'description': self.description_input.toPlainText().strip()
+        }
+
+    def accept(self):
+        if not self.photo_path:
+            QMessageBox.warning(self, '提示', '请先选择照片')
+            return
+        if self.plant_combo.currentIndex() < 0:
+            QMessageBox.warning(self, '提示', '请先选择植株')
+            return
+        super().accept()
+
+
 class PhotosPage(QWidget):
     def __init__(self):
         super().__init__()
@@ -71,6 +145,19 @@ class PhotosPage(QWidget):
         self.search_input.setFixedWidth(200)
         self.search_input.returnPressed.connect(self.load_photos)
         tb_layout.addWidget(self.search_input)
+
+        self.month_filter = QComboBox()
+        self.month_filter.addItem('全部月份')
+        self.month_filter.setFixedWidth(120)
+        self.month_filter.currentIndexChanged.connect(self.load_photos)
+        tb_layout.addWidget(self.month_filter)
+
+        self.status_filter = QComboBox()
+        self.status_filter.addItem('全部状态')
+        self.status_filter.addItems(['正常', '需关注', '病虫害', '枯死'])
+        self.status_filter.setFixedWidth(120)
+        self.status_filter.currentIndexChanged.connect(self.load_photos)
+        tb_layout.addWidget(self.status_filter)
 
         self.plant_filter = QComboBox()
         self.plant_filter.addItem('全部植株')
@@ -117,6 +204,12 @@ class PhotosPage(QWidget):
         self.photo_count_label.setStyleSheet('font-weight: 600; color: #303133; margin-bottom: 8px;')
         right_layout.addWidget(self.photo_count_label)
 
+        self.tabs = QTabWidget()
+
+        grid_tab = QWidget()
+        grid_layout = QVBoxLayout(grid_tab)
+        grid_layout.setContentsMargins(0, 0, 0, 0)
+
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setStyleSheet('border: none;')
@@ -127,7 +220,23 @@ class PhotosPage(QWidget):
         self.grid_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         scroll.setWidget(scroll_content)
 
-        right_layout.addWidget(scroll, 1)
+        grid_layout.addWidget(scroll)
+        self.tabs.addTab(grid_tab, '📁 网格视图')
+
+        timeline_tab = QWidget()
+        timeline_layout = QVBoxLayout(timeline_tab)
+        timeline_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.timeline_tree = QTreeWidget()
+        self.timeline_tree.setHeaderLabels(['巡检时间线'])
+        self.timeline_tree.setHeaderHidden(True)
+        self.timeline_tree.itemDoubleClicked.connect(self.on_timeline_item_doubleclick)
+        timeline_layout.addWidget(self.timeline_tree)
+
+        self.tabs.addTab(timeline_tab, '📅 巡检时间线')
+        self.tabs.currentChanged.connect(self.on_tab_changed)
+
+        right_layout.addWidget(self.tabs, 1)
 
         splitter.addWidget(right_panel)
         splitter.setSizes([200, 1])
@@ -142,7 +251,9 @@ class PhotosPage(QWidget):
 
     def load_data(self):
         self.load_plant_list()
+        self.load_month_filter()
         self.load_photos()
+        self.load_timeline()
 
     def load_plant_list(self):
         plants = PlantManager.get_all()
@@ -187,11 +298,43 @@ class PhotosPage(QWidget):
         else:
             self.plant_filter.setCurrentIndex(0)
 
+    def load_month_filter(self):
+        current_month = self.month_filter.currentData()
+        months = PhotoManager.get_available_months()
+
+        self.month_filter.blockSignals(True)
+        self.month_filter.clear()
+        self.month_filter.addItem('全部月份', None)
+        for m in months:
+            year, month = m.split('-')
+            self.month_filter.addItem(f'{year}年{int(month)}月', m)
+        self.month_filter.blockSignals(False)
+
+        if current_month:
+            idx = self.month_filter.findData(current_month)
+            if idx >= 0:
+                self.month_filter.setCurrentIndex(idx)
+
     def load_photos(self):
         plant_id = self.plant_filter.currentData()
-        photos = PhotoManager.get_all(plant_id=plant_id)
-        self.current_photos = photos
+        month = self.month_filter.currentData()
+        status = self.status_filter.currentText()
 
+        keyword = self.search_input.text().strip()
+        search_plant_ids = None
+        if keyword:
+            search_plant_ids = [p['id'] for p in self.plants
+                                if keyword.lower() in (p.get('name', '') or '').lower()
+                                or keyword.lower() in (p.get('species', '') or '').lower()]
+            if not search_plant_ids:
+                photos = []
+            else:
+                photos = PhotoManager.get_all(plant_id=plant_id, month=month, plant_status=status)
+                photos = [p for p in photos if p.get('plant_id') in search_plant_ids]
+        else:
+            photos = PhotoManager.get_all(plant_id=plant_id, month=month, plant_status=status)
+
+        self.current_photos = photos
         self.photo_count_label.setText(f'共 {len(photos)} 张照片')
 
         while self.grid_layout.count():
@@ -245,9 +388,24 @@ class PhotosPage(QWidget):
         name_label.setWordWrap(True)
         layout.addWidget(name_label)
 
-        date_label = QLabel(photo.get('upload_date', '')[:10])
+        date_label = QLabel(photo.get('shot_date', photo.get('upload_date', '')[:10]))
         date_label.setStyleSheet('font-size: 11px; color: #909399;')
         layout.addWidget(date_label)
+
+        status = photo.get('plant_status', '')
+        if status and status != '正常':
+            status_labels = {'需关注': '#e6a23c', '病虫害': '#f56c6c', '枯死': '#909399'}
+            status_color = status_labels.get(status, '#909399')
+            status_label = QLabel(status)
+            status_label.setStyleSheet(f'''
+                font-size: 10px;
+                color: {status_color};
+                background: {status_color}20;
+                padding: 2px 6px;
+                border-radius: 2px;
+            ''')
+            status_label.setAlignment(Qt.AlignCenter)
+            layout.insertWidget(2, status_label)
 
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(4)
@@ -270,37 +428,31 @@ class PhotosPage(QWidget):
         return card
 
     def upload_photo(self):
-        files, _ = QFileDialog.getOpenFileNames(self, '选择照片', '',
-                                                 '图片文件 (*.jpg *.jpeg *.png *.bmp *.gif)')
-        if not files:
+        if len(self.plants) == 0:
+            QMessageBox.warning(self, '提示', '请先添加植株再上传照片')
             return
 
-        plant_id = self.plant_filter.currentData()
-        if not plant_id:
-            if len(self.plants) == 0:
-                QMessageBox.warning(self, '提示', '请先添加植株再上传照片')
-                return
-            QMessageBox.information(self, '提示', '请先选择要关联的植株')
+        dlg = UploadPhotoDialog(self.plants, self)
+        if dlg.exec() != QDialog.Accepted:
             return
 
-        count = 0
-        for f in files:
-            try:
-                os.makedirs(PHOTO_DIR, exist_ok=True)
-                ext = os.path.splitext(f)[1]
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                new_name = f'plant_{plant_id}_{timestamp}_{count}{ext}'
-                dest = os.path.join(PHOTO_DIR, new_name)
-                shutil.copy2(f, dest)
+        data = dlg.get_data()
+        if not data['photo_path']:
+            return
 
-                PhotoManager.add(plant_id, dest, '')
-                count += 1
-            except Exception as e:
-                QMessageBox.warning(self, '错误', f'上传失败：{str(e)}')
+        try:
+            os.makedirs(PHOTO_DIR, exist_ok=True)
+            ext = os.path.splitext(data['photo_path'])[1]
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            new_name = f'plant_{data["plant_id"]}_{timestamp}{ext}'
+            dest = os.path.join(PHOTO_DIR, new_name)
+            shutil.copy2(data['photo_path'], dest)
 
-        if count > 0:
-            QMessageBox.information(self, '成功', f'成功上传 {count} 张照片')
+            PhotoManager.add(data['plant_id'], dest, data['shot_date'], data['description'])
+            QMessageBox.information(self, '成功', '照片上传成功')
             self.load_data()
+        except Exception as e:
+            QMessageBox.critical(self, '错误', f'上传失败：{str(e)}')
 
     def view_photo(self, photo):
         dlg = PhotoDialog(photo['file_path'], photo.get('description', ''), self)
@@ -311,6 +463,65 @@ class PhotosPage(QWidget):
         if reply == QMessageBox.Yes:
             PhotoManager.delete(photo['id'])
             self.load_data()
+
+    def on_tab_changed(self, index):
+        if index == 1:
+            self.load_timeline()
+
+    def load_timeline(self):
+        self.timeline_tree.clear()
+
+        plant_id = self.plant_filter.currentData()
+        if plant_id:
+            plant = PlantManager.get_by_id(plant_id)
+            if plant:
+                photos_by_month = PhotoManager.get_photos_with_timeline(plant_id)
+                self._build_timeline_for_plant(plant, photos_by_month)
+        else:
+            plants_with_photos = set()
+            all_photos = PhotoManager.get_all(
+                month=self.month_filter.currentData(),
+                plant_status=self.status_filter.currentText()
+            )
+            for p in all_photos:
+                if p.get('plant_id'):
+                    plants_with_photos.add(p['plant_id'])
+
+            for pid in sorted(plants_with_photos):
+                plant = PlantManager.get_by_id(pid)
+                if plant:
+                    photos_by_month = PhotoManager.get_photos_with_timeline(pid)
+                    self._build_timeline_for_plant(plant, photos_by_month)
+
+    def _build_timeline_for_plant(self, plant, photos_by_month):
+        type_icons = {'正常': '🌿', '需关注': '⚠️', '病虫害': '🐛', '枯死': '💀'}
+        status_icon = type_icons.get(plant.get('status', '正常'), '🌿')
+        plant_item = QTreeWidgetItem([f'{status_icon} {plant["name"]}（{plant.get("species", "未知品种")}）'])
+        plant_item.setExpanded(True)
+        self.timeline_tree.addTopLevelItem(plant_item)
+
+        for month in sorted(photos_by_month.keys(), reverse=True):
+            year, mon = month.split('-')
+            month_item = QTreeWidgetItem([f'📅 {year}年{int(mon)}月（{len(photos_by_month[month])}张）'])
+            month_item.setExpanded(True)
+            plant_item.addChild(month_item)
+
+            for photo in photos_by_month[month]:
+                date_str = photo.get('shot_date', photo.get('upload_date', ''))[:10]
+                desc = photo.get('description', '')
+                title = f'📷 {date_str}'
+                if desc:
+                    if len(desc) > 30:
+                        desc = desc[:30] + '...'
+                    title += f' - {desc}'
+                photo_item = QTreeWidgetItem([title])
+                photo_item.setData(0, Qt.UserRole, photo)
+                month_item.addChild(photo_item)
+
+    def on_timeline_item_doubleclick(self, item, column):
+        photo = item.data(0, Qt.UserRole)
+        if photo:
+            self.view_photo(photo)
 
     def refresh(self):
         self.load_data()
